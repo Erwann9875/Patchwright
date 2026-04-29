@@ -1,3 +1,4 @@
+use crate::action::Observation;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -211,4 +212,16 @@ pub struct Symbol {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoView {
     pub root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRequest {
+    pub task: TaskSpec,
+    pub observations: Vec<Observation>,
+    pub counterexamples: Vec<Counterexample>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelResponse {
+    pub action: crate::action::Action,
 }
