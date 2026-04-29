@@ -94,9 +94,11 @@ fn run_solve(args: &[String]) -> Result<(), String> {
         .try_build()
         .map_err(|error| error.to_string())?;
 
-    let _require_patch = options.require_patch;
     let report = agent
-        .solve(TaskSpec::from_text(sandbox_repo, options.task))
+        .solve(
+            TaskSpec::from_text(sandbox_repo, options.task)
+                .with_require_patch(options.require_patch),
+        )
         .map_err(|error| error.to_string())?;
     println!("solve status: {:?}", report.status);
     if report.status != SolveStatus::Accepted {

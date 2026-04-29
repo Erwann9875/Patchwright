@@ -95,6 +95,7 @@ pub struct PatchId(pub String);
 pub struct TaskSpec {
     pub text: String,
     pub repo_path: PathBuf,
+    pub require_patch: bool,
 }
 
 impl TaskSpec {
@@ -102,7 +103,17 @@ impl TaskSpec {
         Self {
             text: text.into(),
             repo_path,
+            require_patch: false,
         }
+    }
+
+    pub fn code_change(repo_path: PathBuf, text: impl Into<String>) -> Self {
+        Self::from_text(repo_path, text).with_require_patch(true)
+    }
+
+    pub fn with_require_patch(mut self, require_patch: bool) -> Self {
+        self.require_patch = require_patch;
+        self
     }
 }
 

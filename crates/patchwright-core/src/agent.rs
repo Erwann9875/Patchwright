@@ -137,6 +137,12 @@ impl Agent {
                     observations.push(Observation::Reverted(snapshot));
                 }
                 Action::Finish { summary } => {
+                    if task.require_patch {
+                        let message = "patch required before finish".to_owned();
+                        observations.push(Observation::Error(message));
+                        continue;
+                    }
+
                     observations.push(Observation::Finished(summary.clone()));
                     return Ok(SolveReport {
                         status: SolveStatus::Finished,

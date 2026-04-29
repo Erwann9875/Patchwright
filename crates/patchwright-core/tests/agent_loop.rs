@@ -220,7 +220,7 @@ fn accepts_patch_after_successful_verification() {
         .expect("agent should build");
 
     let report = agent
-        .solve(TaskSpec::from_text(PathBuf::from("."), "change code"))
+        .solve(TaskSpec::code_change(PathBuf::from("."), "change code"))
         .expect("simulation should solve");
 
     assert_eq!(report.status, SolveStatus::Accepted);
@@ -427,6 +427,107 @@ fn finish_action_returns_finished() {
 
     let report = agent
         .solve(TaskSpec::from_text(PathBuf::from("."), "inspect code"))
+        .expect("simulation should finish");
+
+    assert_eq!(report.status, SolveStatus::Finished);
+    assert_eq!(report.summary, "no change needed");
+    assert!(matches!(
+        report.observations.last(),
+        Some(Observation::Finished(summary)) if summary == "no change needed"
+    ));
+}
+
+#[test]
+fn code_change_task_rejects_immediate_finish() {
+    let model = ScriptedModel {
+        actions: vec![Action::Finish {
+            summary: "done".to_owned(),
+        }],
+    };
+
+    let mut agent = Agent::builder()
+        .model(model)
+        .execution(FakeExecution::default())
+        .language_adapter(FakeLanguage)
+        .indexer(EmptyIndex)
+        .verifier(AcceptingVerifier)
+        .policy(Policy::SafeStructuredOnly)
+        .max_steps(1)
+        .try_build()
+        .expect("agent should build");
+
+    let report = agent
+        .solve(TaskSpec::code_change(PathBuf::from("."), "change code"))
+        .expect("simulation should return patch-required report");
+
+    assert_eq!(report.status, SolveStatus::BudgetExhausted);
+    assert_eq!(report.summary, "step budget exhausted");
+    assert!(report.attempts.is_empty());
+    assert!(report.observations.iter().any(
+        |observation| matches!(observation, Observation::Error(message) if message.contains("patch required"))
+    ));
+}
+
+#[test]
+fn code_change_task_can_recover_after_invalid_finish() {
+    let model = ScriptedModel {
+        actions: vec![
+            Action::Finish {
+                summary: "done".to_owned(),
+            },
+            Action::ApplyPatch(Patch {
+                unified_diff: "diff --git a/a b/a\n".to_owned(),
+            }),
+        ],
+    };
+
+    let mut agent = Agent::builder()
+        .model(model)
+        .execution(FakeExecution::default())
+        .language_adapter(FakeLanguage)
+        .indexer(EmptyIndex)
+        .verifier(AcceptingVerifier)
+        .policy(Policy::SafeStructuredOnly)
+        .max_steps(3)
+        .try_build()
+        .expect("agent should build");
+
+    let report = agent
+        .solve(TaskSpec::code_change(PathBuf::from("."), "change code"))
+        .expect("simulation should recover and accept patch");
+
+    assert_eq!(report.status, SolveStatus::Accepted);
+    assert_eq!(report.attempts.len(), 1);
+    assert_eq!(
+        report.attempts[0].verification.status,
+        VerificationStatus::Accepted
+    );
+    assert!(report.observations.iter().any(
+        |observation| matches!(observation, Observation::Error(message) if message.contains("patch required"))
+    ));
+}
+
+#[test]
+fn info_only_task_can_finish_without_patch() {
+    let model = ScriptedModel {
+        actions: vec![Action::Finish {
+            summary: "no change needed".to_owned(),
+        }],
+    };
+
+    let mut agent = Agent::builder()
+        .model(model)
+        .execution(FakeExecution::default())
+        .language_adapter(FakeLanguage)
+        .indexer(EmptyIndex)
+        .verifier(AcceptingVerifier)
+        .policy(Policy::SafeStructuredOnly)
+        .max_steps(3)
+        .try_build()
+        .expect("agent should build");
+
+    let report = agent
+        .solve(TaskSpec::from_text(PathBuf::from("."), "summarize"))
         .expect("simulation should finish");
 
     assert_eq!(report.status, SolveStatus::Finished);
