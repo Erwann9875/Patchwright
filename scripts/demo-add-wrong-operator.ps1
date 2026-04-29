@@ -26,7 +26,7 @@ $Src = Join-Path $Root "fixtures\rust\add_wrong_operator"
 $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("patchwright-add-wrong-operator." + [System.IO.Path]::GetRandomFileName())
 
 New-Item -ItemType Directory -Path $Tmp | Out-Null
-Copy-Item -Path (Join-Path $Src "*") -Destination $Tmp -Recurse -Force
+Get-ChildItem -LiteralPath $Src -Force | Copy-Item -Destination $Tmp -Recurse -Force
 
 Invoke-Checked "git" @("-C", $Tmp, "init", "-q")
 Invoke-Checked "git" @("-C", $Tmp, "config", "user.email", "patchwright@example.invalid")
