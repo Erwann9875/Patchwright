@@ -5,6 +5,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/fixtures/rust/add_wrong_operator"
 TMP="$(mktemp -d /tmp/patchwright-add-wrong-operator.XXXXXX)"
 
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "cargo was not found in this Bash environment." >&2
+  echo "On Windows, run the PowerShell demo instead:" >&2
+  echo "  powershell -ExecutionPolicy Bypass -File scripts/demo-add-wrong-operator.ps1" >&2
+  exit 127
+fi
+
 cp -R "$SRC/." "$TMP/"
 
 git -C "$TMP" init -q

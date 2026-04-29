@@ -36,7 +36,13 @@ Run the first manual end-to-end fixture demo after `codex login`:
 bash scripts/demo-add-wrong-operator.sh
 ```
 
-The demo copies `fixtures/rust/add_wrong_operator` to `/tmp`, initializes that copy as an independent git repository, commits the broken fixture, runs the failing test, asks Patchwright to solve it through the Codex CLI provider, and then runs the test again. The fixture template in this repository is not modified.
+On Windows PowerShell, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/demo-add-wrong-operator.ps1
+```
+
+The demo copies `fixtures/rust/add_wrong_operator` to a temporary directory outside the Patchwright checkout, initializes that copy as an independent git repository, commits the broken fixture, runs the failing test, asks Patchwright to solve it through the Codex CLI provider, and then runs the test again. The fixture template in this repository is not modified.
 
 ## Project Config
 
