@@ -12,3 +12,7 @@ dependencies = [
 [[package]]
 name = "patchwright-core"
 version = "0.1.0"
+
+[[package]]
+name = "patchwright-test-support"
+version = "0.1.0"

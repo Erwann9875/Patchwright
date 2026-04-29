@@ -2,6 +2,7 @@
 members = [
     "crates/patchwright-cli",
     "crates/patchwright-core",
+    "crates/patchwright-test-support",
 ]
 resolver = "2"
 
