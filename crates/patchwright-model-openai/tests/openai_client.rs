@@ -1,9 +1,12 @@
-use patchwright_core::action::Action;
+use patchwright_core::action::{Action, Observation};
 use patchwright_core::traits::ModelProvider;
 use patchwright_core::types::{
-    FileQuery, LineRange, ModelRequest, Patch, RepoPath, SearchQuery, TaskSpec,
+    Counterexample, FileQuery, FileSlice, LineRange, ModelRequest, Patch, RepoPath, SearchQuery,
+    TaskSpec,
 };
-use patchwright_model_openai::{parse_action_json, OpenAiCompatibleClient, OpenAiConfig};
+use patchwright_model_openai::{
+    build_prompt, parse_action_json, OpenAiCompatibleClient, OpenAiConfig,
+};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -28,6 +31,84 @@ fn request(task: &str) -> ModelRequest {
         observations: Vec::new(),
         counterexamples: Vec::new(),
     }
+}
+
+#[test]
+fn build_prompt_includes_action_contract_and_state() {
+    let request = ModelRequest {
+        task: TaskSpec::from_text(PathBuf::from("."), "Fix the add test"),
+        observations: vec![Observation::FileRead(FileSlice {
+            path: RepoPath::new("src/lib.rs"),
+            start_line: 1,
+            content: "pub fn add(a: i32, b: i32) -> i32 { a - b }\n".to_string(),
+        })],
+        counterexamples: vec![Counterexample {
+            source: "cargo".to_string(),
+            detail: "assertion failed: left == right".to_string(),
+        }],
+    };
+
+    let body = build_prompt(&request, "test-model");
+
+    assert_eq!(body["model"], "test-model");
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert_eq!(body["messages"][1]["role"], "user");
+
+    let system = body["messages"][0]["content"]
+        .as_str()
+        .expect("system content");
+    assert!(system.contains("Return only one JSON action"));
+    assert!(system.contains("Verification decides success"));
+    assert!(system.contains("read_file"));
+    assert!(system.contains("apply_patch"));
+    assert!(system.contains("Core rules"));
+
+    let user = body["messages"][1]["content"]
+        .as_str()
+        .expect("user content");
+    assert!(user.contains("Task:"));
+    assert!(user.contains("Fix the add test"));
+    assert!(user.contains("src/lib.rs"));
+    assert!(user.contains("a - b"));
+    assert!(user.contains("assertion failed"));
+}
+
+#[test]
+fn build_prompt_apply_patch_example_uses_valid_hunk_header() {
+    let body = build_prompt(&request("Fix the add test"), "test-model");
+    let system = body["messages"][0]["content"]
+        .as_str()
+        .expect("system content");
+
+    assert!(system.contains("@@ -1,3 +1,3 @@"));
+    assert!(!system.contains("\\n@@\\n"));
+}
+
+#[test]
+fn build_prompt_caps_large_user_state() {
+    let request = ModelRequest {
+        task: TaskSpec::from_text(PathBuf::from("."), "Fix the add test"),
+        observations: vec![Observation::FileRead(FileSlice {
+            path: RepoPath::new("src/lib.rs"),
+            start_line: 1,
+            content: "pub fn add(a: i32, b: i32) -> i32 { a - b }\n".repeat(2_000),
+        })],
+        counterexamples: vec![Counterexample {
+            source: "cargo".to_string(),
+            detail: "assertion failed: left == right".repeat(2_000),
+        }],
+    };
+
+    let body = build_prompt(&request, "test-model");
+    let user = body["messages"][1]["content"]
+        .as_str()
+        .expect("user content");
+
+    assert!(user.len() <= 24 * 1024);
+    assert!(user.contains("Task:"));
+    assert!(user.contains("Fix the add test"));
+    assert!(user.contains("Observations:"));
+    assert!(user.contains("Counterexamples:"));
 }
 
 #[test]

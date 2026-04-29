@@ -9,6 +9,10 @@ use patchwright_core::types::{
 use serde_json::{json, Value};
 use std::time::Duration;
 
+const USER_PROMPT_MAX_CHARS: usize = 24 * 1024;
+const USER_PROMPT_SECTION_MAX_CHARS: usize = 7 * 1024;
+const TRUNCATION_MARKER: &str = "\n...[truncated]";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenAiConfig {
     pub base_url: String,
@@ -78,19 +82,7 @@ impl OpenAiCompatibleClient {
             self.config.base_url.trim_end_matches('/')
         );
         let authorization = format!("Bearer {api_key}");
-        let body = json!({
-            "model": self.config.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "Return only a JSON Patchwright action object. Supported shape: {\"action\":\"finish\",\"summary\":\"...\"}."
-                },
-                {
-                    "role": "user",
-                    "content": request.task.text
-                }
-            ]
-        });
+        let body = build_prompt(&request, &self.config.model);
 
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(self.config.timeout_seconds))
@@ -124,6 +116,73 @@ impl OpenAiCompatibleClient {
 
         parse_action_json(content)
     }
+}
+
+pub fn build_prompt(request: &ModelRequest, model: &str) -> Value {
+    json!({
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt(),
+            },
+            {
+                "role": "user",
+                "content": user_prompt(request),
+            }
+        ]
+    })
+}
+
+fn system_prompt() -> &'static str {
+    r#"Return only one JSON action. Do not include Markdown fences, commentary, or multiple actions.
+
+Verification decides success. Passing tests or your confidence are not enough unless the verifier accepts the work.
+
+Core rules:
+- Choose exactly one allowed action for the next step.
+- Inspect files before editing when the needed context is missing.
+- Apply the smallest patch that addresses the task and counterexamples.
+- After editing, run verification before finishing.
+- Finish only when verification has accepted the change.
+
+Allowed action examples:
+{"action":"read_file","path":"src/lib.rs","start":1,"end":120}
+{"action":"apply_patch","unified_diff":"diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,3 @@\n pub fn add(a: i32, b: i32) -> i32 {\n-    a - b\n+    a + b\n }\n"}
+{"action":"run_verifier"}
+{"action":"finish","summary":"fixed the failing add test"}"#
+}
+
+fn user_prompt(request: &ModelRequest) -> String {
+    let observations = format!("{:#?}", request.observations);
+    let counterexamples = format!("{:#?}", request.counterexamples);
+
+    let prompt = format!(
+        "Task:\n{}\n\nObservations:\n{}\n\nCounterexamples:\n{}",
+        truncate_chars(&request.task.text, USER_PROMPT_SECTION_MAX_CHARS),
+        truncate_chars(&observations, USER_PROMPT_SECTION_MAX_CHARS),
+        truncate_chars(&counterexamples, USER_PROMPT_SECTION_MAX_CHARS)
+    );
+
+    truncate_chars(&prompt, USER_PROMPT_MAX_CHARS)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let marker_chars = TRUNCATION_MARKER.chars().count();
+    if max_chars <= marker_chars {
+        return TRUNCATION_MARKER.chars().take(max_chars).collect();
+    }
+
+    let mut truncated = value
+        .chars()
+        .take(max_chars - marker_chars)
+        .collect::<String>();
+    truncated.push_str(TRUNCATION_MARKER);
+    truncated
 }
 
 pub fn parse_action_json(content: &str) -> Result<Action> {
