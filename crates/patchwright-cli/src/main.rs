@@ -17,7 +17,7 @@ use patchwright_verify::PlanVerifier;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 
 fn main() -> ExitCode {
     match run(env::args().skip(1)) {
@@ -314,23 +314,9 @@ fn run_config_check(args: &[String]) -> Result<String, String> {
 
 fn run_auth_login(args: &[String]) -> Result<(), String> {
     let config = auth_codex_config(args)?;
-    let status = Command::new(&config.command)
-        .arg("login")
-        .status()
-        .map_err(|error| {
-            format!(
-                "failed to start codex command '{}': {error}",
-                config.command
-            )
-        })?;
-
-    if !status.success() {
-        return Err(format!(
-            "codex login failed with status {:?}",
-            status.code()
-        ));
-    }
-
+    CodexCliClient::new(config)
+        .login()
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 

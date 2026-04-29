@@ -82,6 +82,51 @@ fn codex_cli_provider_kills_hung_process_after_timeout() {
 }
 
 #[cfg(windows)]
+#[test]
+fn codex_cli_provider_resolves_cmd_shim_without_extension_on_windows() {
+    let repo = TempRepo::new("codex-cli-cmd-shim");
+    let _script = fake_codex_script(repo.root());
+    let command_without_extension = repo.root().join("fake-codex");
+
+    let mut client = CodexCliClient::new(CodexCliConfig {
+        command: command_without_extension.to_string_lossy().into_owned(),
+        model: None,
+        timeout_seconds: 5,
+    });
+
+    let response = client
+        .propose_action(request("summarize through cmd shim"))
+        .expect("fake codex.cmd shim should be resolved");
+
+    assert_eq!(
+        response.action,
+        Action::Finish {
+            summary: "from fake codex".to_owned()
+        }
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn codex_cli_login_resolves_cmd_shim_without_extension_on_windows() {
+    let repo = TempRepo::new("codex-cli-login-cmd-shim");
+    let _script = fake_login_codex_script(repo.root());
+    let command_without_extension = repo.root().join("login-codex");
+
+    let client = CodexCliClient::new(CodexCliConfig {
+        command: command_without_extension.to_string_lossy().into_owned(),
+        model: None,
+        timeout_seconds: 5,
+    });
+
+    client.login().expect("fake codex.cmd login should run");
+
+    let args = fs::read_to_string(repo.root().join("login-args.txt"))
+        .expect("fake login codex args should be recorded");
+    assert!(args.contains("login"));
+}
+
+#[cfg(windows)]
 fn fake_codex_script(root: &Path) -> PathBuf {
     let script = root.join("fake-codex.cmd");
     fs::write(
@@ -106,6 +151,23 @@ exit /b 0
         ),
     )
     .expect("fake codex script should be written");
+    script
+}
+
+#[cfg(windows)]
+fn fake_login_codex_script(root: &Path) -> PathBuf {
+    let script = root.join("login-codex.cmd");
+    fs::write(
+        &script,
+        format!(
+            r#"@echo off
+echo %*>"{}"
+exit /b 0
+"#,
+            root.join("login-args.txt").display()
+        ),
+    )
+    .expect("fake login codex script should be written");
     script
 }
 

@@ -45,6 +45,18 @@ impl CodexCliClient {
         &self.config
     }
 
+    pub fn login(&self) -> Result<()> {
+        let status = run_codex_login(&self.config.command)?;
+        if !status.success() {
+            return Err(PatchwrightError::Model(format!(
+                "codex login failed with status {:?}",
+                status.code()
+            )));
+        }
+
+        Ok(())
+    }
+
     pub fn check_auth(&self) -> Result<()> {
         let work_dir = TempActionDir::create()?;
         let schema_path = work_dir.path().join("auth.schema.json");
@@ -154,40 +166,7 @@ fn run_codex_exec(
     action_path: &Path,
     prompt: &str,
 ) -> Result<CodexExecOutput> {
-    let mut command = Command::new(&config.command);
-    command
-        .arg("exec")
-        .arg("--ephemeral")
-        .arg("--sandbox")
-        .arg("read-only")
-        .arg("--ask-for-approval")
-        .arg("never")
-        .arg("--skip-git-repo-check")
-        .arg("--output-schema")
-        .arg(schema_path)
-        .arg("--json")
-        .arg("-o")
-        .arg(action_path);
-
-    if let Some(model) = &config.model {
-        command.arg("--model").arg(model);
-    }
-
-    command.arg("-");
-    prepare_command(&mut command);
-
-    let mut child = command
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            PatchwrightError::Model(format!(
-                "failed to start codex command '{}': {error}",
-                config.command
-            ))
-        })?;
+    let mut child = spawn_codex_exec(config, cwd, schema_path, action_path)?;
 
     let mut stdin = child
         .stdin
@@ -233,6 +212,115 @@ fn run_codex_exec(
 
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn spawn_codex_exec(
+    config: &CodexCliConfig,
+    cwd: &Path,
+    schema_path: &Path,
+    action_path: &Path,
+) -> Result<std::process::Child> {
+    let mut last_error = None;
+
+    for command_name in command_candidates(&config.command) {
+        let mut command = Command::new(&command_name);
+        configure_codex_exec_command(config, &mut command, schema_path, action_path);
+
+        match command
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => return Ok(child),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                last_error = Some(error);
+            }
+            Err(error) => {
+                return Err(PatchwrightError::Model(format!(
+                    "failed to start codex command '{}': {error}",
+                    command_name
+                )));
+            }
+        }
+    }
+
+    Err(PatchwrightError::Model(format!(
+        "failed to start codex command '{}': {}",
+        config.command,
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "program not found".to_owned())
+    )))
+}
+
+fn configure_codex_exec_command(
+    config: &CodexCliConfig,
+    command: &mut Command,
+    schema_path: &Path,
+    action_path: &Path,
+) {
+    command
+        .arg("exec")
+        .arg("--ephemeral")
+        .arg("--sandbox")
+        .arg("read-only")
+        .arg("--ask-for-approval")
+        .arg("never")
+        .arg("--skip-git-repo-check")
+        .arg("--output-schema")
+        .arg(schema_path)
+        .arg("--json")
+        .arg("-o")
+        .arg(action_path);
+
+    if let Some(model) = &config.model {
+        command.arg("--model").arg(model);
+    }
+
+    command.arg("-");
+    prepare_command(command);
+}
+
+fn run_codex_login(command: &str) -> Result<ExitStatus> {
+    let mut last_error = None;
+
+    for command_name in command_candidates(command) {
+        match Command::new(&command_name).arg("login").status() {
+            Ok(status) => return Ok(status),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                last_error = Some(error);
+            }
+            Err(error) => {
+                return Err(PatchwrightError::Model(format!(
+                    "failed to start codex command '{}': {error}",
+                    command_name
+                )));
+            }
+        }
+    }
+
+    Err(PatchwrightError::Model(format!(
+        "failed to start codex command '{}': {}",
+        command,
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "program not found".to_owned())
+    )))
+}
+
+fn command_candidates(command: &str) -> Vec<String> {
+    let mut candidates = vec![command.to_owned()];
+
+    #[cfg(windows)]
+    {
+        if Path::new(command).extension().is_none() {
+            candidates.push(format!("{command}.cmd"));
+        }
+    }
+
+    candidates
 }
 
 #[cfg(unix)]
