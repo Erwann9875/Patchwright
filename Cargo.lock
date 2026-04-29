@@ -14,5 +14,13 @@ name = "patchwright-core"
 version = "0.1.0"
 
 [[package]]
+name = "patchwright-exec-local"
+version = "0.1.0"
+dependencies = [
+ "patchwright-core",
+ "patchwright-test-support",
+]
+
+[[package]]
 name = "patchwright-test-support"
 version = "0.1.0"
