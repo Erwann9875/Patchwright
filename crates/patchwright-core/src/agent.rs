@@ -47,10 +47,14 @@ impl Agent {
         };
 
         for _step in 0..self.max_steps {
+            let context = self
+                .indexer
+                .context_pack(&task, &observations, &counterexamples)?;
             let response = self.model.propose_action(ModelRequest {
                 task: task.clone(),
                 observations: observations.clone(),
                 counterexamples: counterexamples.clone(),
+                context: Some(context),
             })?;
 
             match response.action {

@@ -1,8 +1,8 @@
 use patchwright_core::action::{Action, Observation};
 use patchwright_core::traits::ModelProvider;
 use patchwright_core::types::{
-    Counterexample, FileQuery, FileSlice, LineRange, ModelRequest, Patch, RepoPath, SearchQuery,
-    TaskSpec,
+    ContextPack, Counterexample, FileQuery, FileSlice, LineRange, ModelRequest, Patch, RepoPath,
+    ScoredPath, SearchQuery, TaskSpec,
 };
 use patchwright_model_openai::{
     build_prompt, parse_action_json, OpenAiCompatibleClient, OpenAiConfig,
@@ -30,6 +30,7 @@ fn request(task: &str) -> ModelRequest {
         task: TaskSpec::from_text(PathBuf::from("."), task),
         observations: Vec::new(),
         counterexamples: Vec::new(),
+        context: None,
     }
 }
 
@@ -46,6 +47,7 @@ fn build_prompt_includes_action_contract_and_state() {
             source: "cargo".to_string(),
             detail: "assertion failed: left == right".to_string(),
         }],
+        context: None,
     };
 
     let body = build_prompt(&request, "test-model");
@@ -85,6 +87,41 @@ fn build_prompt_apply_patch_example_uses_valid_hunk_header() {
 }
 
 #[test]
+fn build_prompt_renders_context_pack() {
+    let request = ModelRequest {
+        task: TaskSpec::from_text(PathBuf::from("."), "Fix the parser"),
+        observations: Vec::new(),
+        counterexamples: Vec::new(),
+        context: Some(ContextPack {
+            files: vec![
+                ScoredPath {
+                    path: RepoPath::new("src/lib.rs"),
+                    score: 80,
+                },
+                ScoredPath {
+                    path: RepoPath::new("Cargo.toml"),
+                    score: 70,
+                },
+            ],
+            likely_tests: vec![RepoPath::new("tests/parser_test.rs")],
+            manifests: vec![RepoPath::new("Cargo.toml")],
+            recent_observations: Vec::new(),
+            counterexamples: Vec::new(),
+        }),
+    };
+
+    let body = build_prompt(&request, "test-model");
+    let user = body["messages"][1]["content"]
+        .as_str()
+        .expect("user content");
+
+    assert!(user.contains("Context:"));
+    assert!(user.contains("Cargo.toml"));
+    assert!(user.contains("src/lib.rs"));
+    assert!(user.contains("tests/parser_test.rs"));
+}
+
+#[test]
 fn build_prompt_caps_large_user_state() {
     let request = ModelRequest {
         task: TaskSpec::from_text(PathBuf::from("."), "Fix the add test"),
@@ -97,6 +134,7 @@ fn build_prompt_caps_large_user_state() {
             source: "cargo".to_string(),
             detail: "assertion failed: left == right".repeat(2_000),
         }],
+        context: None,
     };
 
     let body = build_prompt(&request, "test-model");
@@ -109,6 +147,52 @@ fn build_prompt_caps_large_user_state() {
     assert!(user.contains("Fix the add test"));
     assert!(user.contains("Observations:"));
     assert!(user.contains("Counterexamples:"));
+}
+
+#[test]
+fn build_prompt_preserves_context_before_large_state_sections() {
+    let request = ModelRequest {
+        task: TaskSpec::from_text(PathBuf::from("."), "Fix the parser"),
+        observations: vec![Observation::FileRead(FileSlice {
+            path: RepoPath::new("logs/full.txt"),
+            start_line: 1,
+            content: "observed failure\n".repeat(5_000),
+        })],
+        counterexamples: vec![Counterexample {
+            source: "cargo test".to_string(),
+            detail: "counterexample detail\n".repeat(5_000),
+        }],
+        context: Some(ContextPack {
+            files: vec![
+                ScoredPath {
+                    path: RepoPath::new("Cargo.toml"),
+                    score: 90,
+                },
+                ScoredPath {
+                    path: RepoPath::new("src/lib.rs"),
+                    score: 80,
+                },
+            ],
+            likely_tests: Vec::new(),
+            manifests: vec![RepoPath::new("Cargo.toml")],
+            recent_observations: Vec::new(),
+            counterexamples: Vec::new(),
+        }),
+    };
+
+    let body = build_prompt(&request, "test-model");
+    let user = body["messages"][1]["content"]
+        .as_str()
+        .expect("user content");
+
+    assert!(user.len() <= 24 * 1024);
+    assert!(user.contains("Context:"));
+    assert!(user.contains("Cargo.toml"));
+    assert!(user.contains("src/lib.rs"));
+    assert!(
+        user.find("Context:").expect("context section")
+            < user.find("Observations:").expect("observations section")
+    );
 }
 
 #[test]
