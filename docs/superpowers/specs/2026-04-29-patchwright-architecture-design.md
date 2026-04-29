@@ -191,6 +191,7 @@ The first execution backend is local:
 
 - git worktree isolation
 - temporary working directories
+- clean-source preflight for the first version, until dirty-state overlay support exists
 - structured file operations
 - allowlisted process runner
 - captured stdout and stderr
@@ -259,7 +260,7 @@ It should support:
 - Cargo workspace detection
 - `cargo metadata` parsing
 - verifier plan generation
-- `cargo fmt --check`
+- `cargo fmt -- --check`
 - `cargo check`
 - `cargo test`
 - optional `cargo clippy`

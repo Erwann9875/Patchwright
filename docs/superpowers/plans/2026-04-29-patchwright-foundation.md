@@ -95,12 +95,6 @@ Create `Cargo.toml`:
 members = [
     "crates/patchwright-cli",
     "crates/patchwright-core",
-    "crates/patchwright-exec-local",
-    "crates/patchwright-index",
-    "crates/patchwright-lang-rust",
-    "crates/patchwright-model-openai",
-    "crates/patchwright-test-support",
-    "crates/patchwright-verify",
 ]
 resolver = "2"
 
@@ -116,6 +110,8 @@ unsafe_code = "forbid"
 dbg_macro = "deny"
 todo = "deny"
 ```
+
+Add later crates to `workspace.members` in the task that creates each crate. Do not list crates before their `Cargo.toml` exists, because Cargo refuses to load a workspace with missing members.
 
 - [ ] **Step 2: Write minimal core crate files**
 
@@ -1164,10 +1160,22 @@ git commit -m "feat(core): add agent contracts and loop"
 ## Task 4: Test Support for Temporary Git Repositories
 
 **Files:**
+- Modify: `Cargo.toml`
 - Create: `crates/patchwright-test-support/Cargo.toml`
 - Create: `crates/patchwright-test-support/src/lib.rs`
 
 - [ ] **Step 1: Create the crate manifest**
+
+Modify root `Cargo.toml` to add the new crate:
+
+```toml
+[workspace]
+members = [
+    "crates/patchwright-cli",
+    "crates/patchwright-core",
+    "crates/patchwright-test-support",
+]
+```
 
 Create `crates/patchwright-test-support/Cargo.toml`:
 
@@ -1290,11 +1298,24 @@ git commit -m "test(support): add temporary git repositories"
 ## Task 5: Local Execution Backend
 
 **Files:**
+- Modify: `Cargo.toml`
 - Create: `crates/patchwright-exec-local/Cargo.toml`
 - Create: `crates/patchwright-exec-local/src/lib.rs`
 - Create: `crates/patchwright-exec-local/tests/local_execution.rs`
 
 - [ ] **Step 1: Create the crate manifest**
+
+Modify root `Cargo.toml` to add the new crate:
+
+```toml
+[workspace]
+members = [
+    "crates/patchwright-cli",
+    "crates/patchwright-core",
+    "crates/patchwright-test-support",
+    "crates/patchwright-exec-local",
+]
+```
 
 Create `crates/patchwright-exec-local/Cargo.toml`:
 
@@ -1671,18 +1692,32 @@ Expected: all local execution tests pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/patchwright-exec-local
+git add Cargo.toml crates/patchwright-exec-local
 git commit -m "feat(exec-local): add local execution backend"
 ```
 
 ## Task 6: Lightweight Indexer
 
 **Files:**
+- Modify: `Cargo.toml`
 - Create: `crates/patchwright-index/Cargo.toml`
 - Create: `crates/patchwright-index/src/lib.rs`
 - Create: `crates/patchwright-index/tests/basic_index.rs`
 
 - [ ] **Step 1: Create manifest and failing tests**
+
+Modify root `Cargo.toml` to add the new crate:
+
+```toml
+[workspace]
+members = [
+    "crates/patchwright-cli",
+    "crates/patchwright-core",
+    "crates/patchwright-test-support",
+    "crates/patchwright-exec-local",
+    "crates/patchwright-index",
+]
+```
 
 Create `crates/patchwright-index/Cargo.toml`:
 
@@ -1857,18 +1892,33 @@ Expected: all indexer tests pass.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/patchwright-index
+git add Cargo.toml crates/patchwright-index
 git commit -m "feat(index): add basic repository indexer"
 ```
 
 ## Task 7: Rust Language Adapter
 
 **Files:**
+- Modify: `Cargo.toml`
 - Create: `crates/patchwright-lang-rust/Cargo.toml`
 - Create: `crates/patchwright-lang-rust/src/lib.rs`
 - Create: `crates/patchwright-lang-rust/tests/rust_adapter.rs`
 
 - [ ] **Step 1: Create manifest and failing tests**
+
+Modify root `Cargo.toml` to add the new crate:
+
+```toml
+[workspace]
+members = [
+    "crates/patchwright-cli",
+    "crates/patchwright-core",
+    "crates/patchwright-test-support",
+    "crates/patchwright-exec-local",
+    "crates/patchwright-index",
+    "crates/patchwright-lang-rust",
+]
+```
 
 Create `crates/patchwright-lang-rust/Cargo.toml`:
 
@@ -1924,7 +1974,7 @@ fn detects_cargo_projects_and_builds_verifier_plan() {
         &view,
     );
     let commands: Vec<String> = plan.commands.iter().map(|cmd| cmd.args.join(" ")).collect();
-    assert!(commands.contains(&"fmt --check".to_owned()));
+    assert!(commands.contains(&"fmt -- --check".to_owned()));
     assert!(commands.contains(&"check".to_owned()));
     assert!(commands.contains(&"test".to_owned()));
 }
@@ -2042,18 +2092,34 @@ Expected: all Rust adapter tests pass.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/patchwright-lang-rust
+git add Cargo.toml crates/patchwright-lang-rust
 git commit -m "feat(lang-rust): add cargo verifier planning"
 ```
 
 ## Task 8: Verifier Runner
 
 **Files:**
+- Modify: `Cargo.toml`
 - Create: `crates/patchwright-verify/Cargo.toml`
 - Create: `crates/patchwright-verify/src/lib.rs`
 - Create: `crates/patchwright-verify/tests/verifier.rs`
 
 - [ ] **Step 1: Create manifest and failing tests**
+
+Modify root `Cargo.toml` to add the new crate:
+
+```toml
+[workspace]
+members = [
+    "crates/patchwright-cli",
+    "crates/patchwright-core",
+    "crates/patchwright-test-support",
+    "crates/patchwright-exec-local",
+    "crates/patchwright-index",
+    "crates/patchwright-lang-rust",
+    "crates/patchwright-verify",
+]
+```
 
 Create `crates/patchwright-verify/Cargo.toml`:
 
@@ -2249,18 +2315,35 @@ Expected: verifier tests pass.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/patchwright-verify
+git add Cargo.toml crates/patchwright-verify
 git commit -m "feat(verify): add verifier runner"
 ```
 
 ## Task 9: OpenAI-Compatible Model Adapter
 
 **Files:**
+- Modify: `Cargo.toml`
 - Create: `crates/patchwright-model-openai/Cargo.toml`
 - Create: `crates/patchwright-model-openai/src/lib.rs`
 - Create: `crates/patchwright-model-openai/tests/openai_client.rs`
 
 - [ ] **Step 1: Create manifest and request-building test**
+
+Modify root `Cargo.toml` to add the new crate:
+
+```toml
+[workspace]
+members = [
+    "crates/patchwright-cli",
+    "crates/patchwright-core",
+    "crates/patchwright-test-support",
+    "crates/patchwright-exec-local",
+    "crates/patchwright-index",
+    "crates/patchwright-lang-rust",
+    "crates/patchwright-verify",
+    "crates/patchwright-model-openai",
+]
+```
 
 Create `crates/patchwright-model-openai/Cargo.toml`:
 
@@ -2539,7 +2622,7 @@ Expected: dry-run, parser, and local mocked HTTP tests pass without external net
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/patchwright-model-openai
+git add Cargo.toml crates/patchwright-model-openai
 git commit -m "feat(model-openai): add openai-compatible client boundary"
 ```
 
@@ -2693,7 +2776,7 @@ Expected: CLI tests pass.
 
 Run: `cargo run -p patchwright-cli -- verify --repo .`
 
-Expected: if the current repo is not a Rust workspace yet, command prints `no supported language adapter detected` and exits non-zero. After Task 1's workspace exists, command prints Cargo commands.
+Expected: if the current repo is not a Rust workspace yet, command prints `no supported language adapter detected` and exits non-zero. After Task 1's workspace exists, command prints and runs Cargo commands.
 
 Run: `cargo run -p patchwright-cli -- solve --repo . --task "summarize"`
 
