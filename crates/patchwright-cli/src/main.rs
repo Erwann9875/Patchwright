@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use patchwright_config::{ModelProviderKind, PatchwrightConfig, RustConfig};
-use patchwright_core::agent::{Agent, SolveReport};
+use patchwright_core::agent::{Agent, SolveReport, SolveStatus};
 use patchwright_core::error::Result as PatchwrightResult;
 use patchwright_core::policy::Policy;
 use patchwright_core::traits::{LanguageAdapter, ModelProvider, Verifier};
@@ -16,8 +16,9 @@ use patchwright_model_openai::{OpenAiCompatibleClient, OpenAiConfig};
 use patchwright_verify::PlanVerifier;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode, Stdio};
 
 fn main() -> ExitCode {
     match run(env::args().skip(1)) {
@@ -91,11 +92,75 @@ fn run_solve(args: &[String]) -> Result<(), String> {
 
     let report = agent
         .solve(
-            TaskSpec::from_text(sandbox_repo, options.task)
+            TaskSpec::from_text(sandbox_repo.clone(), options.task)
                 .with_require_patch(options.require_patch),
         )
         .map_err(|error| error.to_string())?;
+    if report.status == SolveStatus::Accepted {
+        apply_sandbox_diff_to_source(&sandbox_repo, &options.repo)?;
+    }
     println!("{}", render_solve_report(&report));
+
+    Ok(())
+}
+
+fn apply_sandbox_diff_to_source(sandbox_repo: &Path, source_repo: &Path) -> Result<(), String> {
+    let add_intent = Command::new("git")
+        .arg("-C")
+        .arg(sandbox_repo)
+        .args(["add", "-N", "--", "."])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !add_intent.status.success() {
+        return Err(format!(
+            "failed to prepare accepted patch diff: {}",
+            String::from_utf8_lossy(&add_intent.stderr)
+        ));
+    }
+
+    let diff = Command::new("git")
+        .arg("-C")
+        .arg(sandbox_repo)
+        .args(["diff", "--binary", "--"])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !diff.status.success() {
+        return Err(format!(
+            "failed to export accepted patch diff: {}",
+            String::from_utf8_lossy(&diff.stderr)
+        ));
+    }
+    if diff.stdout.is_empty() {
+        return Ok(());
+    }
+
+    let mut apply = Command::new("git")
+        .arg("-C")
+        .arg(source_repo)
+        .args(["apply", "--whitespace=nowarn"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let mut stdin = apply
+        .stdin
+        .take()
+        .ok_or_else(|| "failed to open git apply stdin".to_owned())?;
+    stdin
+        .write_all(&diff.stdout)
+        .map_err(|error| error.to_string())?;
+    drop(stdin);
+
+    let output = apply
+        .wait_with_output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to apply accepted patch to source repo: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
 
     Ok(())
 }
@@ -1282,6 +1347,26 @@ mod tests {
         assert!(output.contains("Counterexamples:"));
         assert!(output.contains("assertion failed: expected 5, got -1"));
         assert!(!output.contains("second line"));
+    }
+
+    #[test]
+    fn applies_sandbox_diff_back_to_source_repo() {
+        let repo = TempRepo::new("cli-apply-sandbox-diff");
+        repo.write("src/lib.rs", "pub fn value() -> i32 { 1 }\n");
+        repo.commit_all("seed source");
+        let sandbox = patchwright_exec_local::GitWorktreeSandbox::create(repo.root()).unwrap();
+
+        fs::write(
+            sandbox.root().join("src/lib.rs"),
+            "pub fn value() -> i32 { 2 }\n",
+        )
+        .unwrap();
+
+        super::apply_sandbox_diff_to_source(sandbox.root(), repo.root()).unwrap();
+
+        assert!(fs::read_to_string(repo.root().join("src/lib.rs"))
+            .unwrap()
+            .contains("pub fn value() -> i32 { 2 }"));
     }
 
     fn toml_escape_path(path: &Path) -> String {
