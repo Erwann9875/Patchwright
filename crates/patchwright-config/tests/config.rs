@@ -22,6 +22,7 @@ fn defaults_match_v0_1_plan() {
     assert_eq!(config.agent.max_changed_files, 5);
     assert_eq!(config.agent.max_inserted_lines, 300);
     assert_eq!(config.policy.allowed_programs, vec!["cargo"]);
+    assert!(config.verify.commands.is_empty());
     assert!(config.rust.fmt);
     assert!(config.rust.check);
     assert!(config.rust.test);
@@ -55,6 +56,10 @@ require_patch = false
 
 [policy]
 allowed_programs = ["cargo", "rustc"]
+
+[[verify.commands]]
+name = "test"
+command = "cargo test"
 
 [rust]
 clippy = true
@@ -90,6 +95,9 @@ clippy = true
     assert_eq!(config.agent.max_changed_files, 5);
     assert_eq!(config.agent.max_inserted_lines, 300);
     assert_eq!(config.policy.allowed_programs, vec!["cargo", "rustc"]);
+    assert_eq!(config.verify.commands.len(), 1);
+    assert_eq!(config.verify.commands[0].name, "test");
+    assert_eq!(config.verify.commands[0].command, "cargo test");
     assert!(config.rust.fmt);
     assert!(config.rust.check);
     assert!(config.rust.test);
@@ -149,6 +157,24 @@ fn rejects_empty_allowed_programs() {
     assert!(matches!(
         result,
         Err(PatchwrightError::InvalidInput(message)) if message.contains("policy.allowed_programs")
+    ));
+}
+
+#[test]
+fn rejects_empty_generic_verify_commands() {
+    let empty_name = PatchwrightConfig::from_toml_str(
+        "[[verify.commands]]\nname = \"\"\ncommand = \"npm test\"\n",
+    );
+    let empty_command =
+        PatchwrightConfig::from_toml_str("[[verify.commands]]\nname = \"test\"\ncommand = \"\"\n");
+
+    assert!(matches!(
+        empty_name,
+        Err(PatchwrightError::InvalidInput(message)) if message.contains("verify.commands.name")
+    ));
+    assert!(matches!(
+        empty_command,
+        Err(PatchwrightError::InvalidInput(message)) if message.contains("verify.commands.command")
     ));
 }
 

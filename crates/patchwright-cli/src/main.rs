@@ -1,13 +1,14 @@
 #![forbid(unsafe_code)]
 
-use patchwright_config::{ModelProviderKind, PatchwrightConfig, RustConfig};
+use patchwright_config::{ModelProviderKind, PatchwrightConfig, RustConfig, VerifyCommandConfig};
 use patchwright_core::agent::{Agent, SolveReport, SolveStatus};
 use patchwright_core::error::Result as PatchwrightResult;
 use patchwright_core::policy::Policy;
 use patchwright_core::traits::{Indexer, LanguageAdapter, ModelProvider, Verifier};
 use patchwright_core::types::{
-    ArchitectureDesign, DesignOption, EvidenceRef, FileImpact, ModelRequest, ModelResponse,
-    PlanStep, RepoView, Risk, TaskSpec, VerificationStatus,
+    ArchitectureDesign, CommandSpec, Counterexample, DesignOption, DetectionScore, EvidenceRef,
+    FileImpact, FileQuery, ModelRequest, ModelResponse, PlanStep, RepoView, Risk, RunReport,
+    ScoredPath, TaskSpec, VerificationStatus, VerifierPlan,
 };
 use patchwright_exec_local::{GitWorktreeSandbox, LocalExecution};
 use patchwright_index::{profile_project, BasicIndexer, ProjectProfile};
@@ -137,7 +138,13 @@ fn run_solve(args: &[String]) -> Result<(), String> {
     let sandbox = GitWorktreeSandbox::create(&options.repo).map_err(|error| error.to_string())?;
     let sandbox_repo = sandbox.root().to_path_buf();
     let execution = LocalExecution::new(&sandbox_repo);
-    let language_adapter = rust_adapter(&options.rust);
+    let language_adapter = language_adapter(
+        &options.rust,
+        &options.verify_commands,
+        &RepoView {
+            root: sandbox_repo.clone(),
+        },
+    )?;
     let indexer = BasicIndexer::new(&sandbox_repo);
     let verifier = PlanVerifier;
     let policy = Policy::ProjectConfiguredCommands {
@@ -571,6 +578,7 @@ struct SolveOptions {
     max_inserted_lines: usize,
     allowed_programs: Vec<String>,
     rust: RustConfig,
+    verify_commands: Vec<VerifyCommandConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -655,6 +663,7 @@ fn solve_options(args: &[String]) -> Result<SolveOptions, String> {
         max_inserted_lines: config.agent.max_inserted_lines,
         allowed_programs: config.policy.allowed_programs,
         rust: config.rust,
+        verify_commands: config.verify.commands,
     })
 }
 
@@ -1002,10 +1011,10 @@ fn run_verify(args: &[String]) -> Result<(), String> {
     let config = PatchwrightConfig::load(&repo).map_err(|error| error.to_string())?;
     let sandbox = GitWorktreeSandbox::create(&repo).map_err(|error| error.to_string())?;
     let sandbox_repo = sandbox.root().to_path_buf();
-    let adapter = rust_adapter(&config.rust);
     let repo_view = RepoView {
         root: sandbox_repo.clone(),
     };
+    let adapter = language_adapter(&config.rust, &config.verify.commands, &repo_view)?;
     if adapter.detect(&repo_view).0 == 0 {
         return Err("no supported language adapter detected".to_owned());
     }
@@ -1214,6 +1223,145 @@ fn design_model(options: &DesignOptions) -> Result<CliModel, String> {
 
 fn rust_adapter(config: &RustConfig) -> RustAdapter {
     RustAdapter::new(config.fmt, config.check, config.test, config.clippy)
+}
+
+fn language_adapter(
+    rust: &RustConfig,
+    verify_commands: &[VerifyCommandConfig],
+    repo: &RepoView,
+) -> Result<CliLanguageAdapter, String> {
+    let rust_adapter = rust_adapter(rust);
+    if rust_adapter.detect(repo).0 > 0 {
+        return Ok(CliLanguageAdapter::Rust(rust_adapter));
+    }
+
+    if !verify_commands.is_empty() {
+        return Ok(CliLanguageAdapter::Configured(ConfiguredVerifyAdapter {
+            commands: configured_command_specs(verify_commands)?,
+        }));
+    }
+
+    Ok(CliLanguageAdapter::Rust(rust_adapter))
+}
+
+enum CliLanguageAdapter {
+    Rust(RustAdapter),
+    Configured(ConfiguredVerifyAdapter),
+}
+
+impl LanguageAdapter for CliLanguageAdapter {
+    fn detect(&self, repo: &RepoView) -> DetectionScore {
+        match self {
+            Self::Rust(adapter) => adapter.detect(repo),
+            Self::Configured(adapter) => adapter.detect(repo),
+        }
+    }
+
+    fn verifier_plan(&self, task: &TaskSpec, repo: &RepoView) -> VerifierPlan {
+        match self {
+            Self::Rust(adapter) => adapter.verifier_plan(task, repo),
+            Self::Configured(adapter) => adapter.verifier_plan(task, repo),
+        }
+    }
+
+    fn relevant_files(&self, task: &TaskSpec, index: &dyn Indexer) -> Vec<ScoredPath> {
+        match self {
+            Self::Rust(adapter) => adapter.relevant_files(task, index),
+            Self::Configured(adapter) => adapter.relevant_files(task, index),
+        }
+    }
+
+    fn summarize_failure(&self, report: &RunReport) -> Vec<Counterexample> {
+        match self {
+            Self::Rust(adapter) => adapter.summarize_failure(report),
+            Self::Configured(adapter) => adapter.summarize_failure(report),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ConfiguredVerifyAdapter {
+    commands: Vec<CommandSpec>,
+}
+
+impl LanguageAdapter for ConfiguredVerifyAdapter {
+    fn detect(&self, _repo: &RepoView) -> DetectionScore {
+        DetectionScore(1)
+    }
+
+    fn verifier_plan(&self, _task: &TaskSpec, _repo: &RepoView) -> VerifierPlan {
+        VerifierPlan {
+            commands: self.commands.clone(),
+        }
+    }
+
+    fn relevant_files(&self, _task: &TaskSpec, index: &dyn Indexer) -> Vec<ScoredPath> {
+        index
+            .list_files(FileQuery::default())
+            .unwrap_or_default()
+            .into_iter()
+            .take(20)
+            .collect()
+    }
+
+    fn summarize_failure(&self, report: &RunReport) -> Vec<Counterexample> {
+        if report.status.success {
+            return Vec::new();
+        }
+
+        let output = if report.stderr.trim().is_empty() {
+            report.stdout.as_str()
+        } else {
+            report.stderr.as_str()
+        };
+
+        vec![Counterexample {
+            source: report.command.program.clone(),
+            detail: output.lines().take(20).collect::<Vec<_>>().join("\n"),
+        }]
+    }
+}
+
+fn configured_command_specs(commands: &[VerifyCommandConfig]) -> Result<Vec<CommandSpec>, String> {
+    commands.iter().map(configured_command_spec).collect()
+}
+
+fn configured_command_spec(command: &VerifyCommandConfig) -> Result<CommandSpec, String> {
+    let words = split_command_words(&command.command)?;
+    let Some((program, args)) = words.split_first() else {
+        return Err(format!("verify command '{}' is empty", command.name));
+    };
+
+    Ok(CommandSpec::new(program, args.iter()))
+}
+
+fn split_command_words(command: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+
+    for character in command.chars() {
+        match (quote, character) {
+            (Some(active), next) if next == active => quote = None,
+            (Some(_), next) => current.push(next),
+            (None, '"' | '\'') => quote = Some(character),
+            (None, next) if next.is_whitespace() => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            (None, next) => current.push(next),
+        }
+    }
+
+    if let Some(active) = quote {
+        return Err(format!("verify command has unterminated {active} quote"));
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+
+    Ok(words)
 }
 
 fn value_after(args: &[String], flag: &str) -> Option<String> {
@@ -1873,6 +2021,52 @@ mod tests {
     }
 
     #[test]
+    fn verify_uses_configured_commands_without_rust_adapter() {
+        let repo = TempRepo::new("cli-verify-generic-command");
+        repo.write("package.json", "{}\n");
+        let script = fake_verify_script(repo.root(), true);
+        let script_text = toml_escape_path(&script);
+        repo.write(
+            "patchwright.toml",
+            &format!(
+                "[policy]\nallowed_programs = [\"{script_text}\"]\n\n[[verify.commands]]\nname = \"test\"\ncommand = \"{script_text}\"\n"
+            ),
+        );
+        repo.commit_all("seed generic verification repo");
+
+        let result = run([
+            "verify".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+        ]);
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn verify_denies_unallowlisted_configured_commands() {
+        let repo = TempRepo::new("cli-verify-generic-command-denied");
+        repo.write("package.json", "{}\n");
+        let script = fake_verify_script(repo.root(), true);
+        let script_text = toml_escape_path(&script);
+        repo.write(
+            "patchwright.toml",
+            &format!(
+                "[policy]\nallowed_programs = [\"cargo\"]\n\n[[verify.commands]]\nname = \"test\"\ncommand = \"{script_text}\"\n"
+            ),
+        );
+        repo.commit_all("seed denied generic verification repo");
+
+        let result = run([
+            "verify".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+        ]);
+
+        assert!(matches!(result, Err(message) if message.contains("verification rejected")));
+    }
+
+    #[test]
     fn startup_benchmark_reports_micros_not_nanos() {
         assert_eq!(super::startup_average_micros(40_000, 20), 2);
     }
@@ -2040,6 +2234,59 @@ mod tests {
 
     fn toml_escape_path(path: &Path) -> String {
         path.to_string_lossy().replace('\\', "\\\\")
+    }
+
+    #[cfg(windows)]
+    fn fake_verify_script(root: &Path, succeeds: bool) -> PathBuf {
+        let script = root.join(if succeeds {
+            "fake-verify-ok.cmd"
+        } else {
+            "fake-verify-fail.cmd"
+        });
+        let exit_code = if succeeds { 0 } else { 1 };
+        fs::write(
+            &script,
+            format!(
+                r#"@echo off
+echo verified>"{}"
+exit /b {}
+"#,
+                root.join("verified.txt").display(),
+                exit_code
+            ),
+        )
+        .expect("fake verify script should be written");
+        script
+    }
+
+    #[cfg(not(windows))]
+    fn fake_verify_script(root: &Path, succeeds: bool) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = root.join(if succeeds {
+            "fake-verify-ok"
+        } else {
+            "fake-verify-fail"
+        });
+        let exit_code = if succeeds { 0 } else { 1 };
+        fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' verified > "{}"
+exit {}
+"#,
+                root.join("verified.txt").display(),
+                exit_code
+            ),
+        )
+        .expect("fake verify script should be written");
+        let mut permissions = fs::metadata(&script)
+            .expect("fake verify script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("fake verify script should be executable");
+        script
     }
 
     #[cfg(windows)]

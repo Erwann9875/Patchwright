@@ -10,6 +10,7 @@ use std::path::Path;
 pub struct PatchwrightConfig {
     pub model: ModelConfig,
     pub agent: AgentConfig,
+    pub verify: VerifyConfig,
     pub policy: PolicyConfig,
     pub rust: RustConfig,
 }
@@ -75,6 +76,19 @@ impl PatchwrightConfig {
             return Err(PatchwrightError::InvalidInput(
                 "agent.max_inserted_lines must be greater than 0".to_owned(),
             ));
+        }
+
+        for command in &self.verify.commands {
+            if command.name.trim().is_empty() {
+                return Err(PatchwrightError::InvalidInput(
+                    "verify.commands.name must not be empty".to_owned(),
+                ));
+            }
+            if command.command.trim().is_empty() {
+                return Err(PatchwrightError::InvalidInput(
+                    "verify.commands.command must not be empty".to_owned(),
+                ));
+            }
         }
 
         if self.policy.allowed_programs.is_empty() {
@@ -176,6 +190,19 @@ impl Default for AgentConfig {
             max_inserted_lines: 300,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VerifyConfig {
+    pub commands: Vec<VerifyCommandConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifyCommandConfig {
+    pub name: String,
+    pub command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
