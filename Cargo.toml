@@ -6,6 +6,7 @@ members = [
     "crates/patchwright-exec-local",
     "crates/patchwright-index",
     "crates/patchwright-lang-rust",
+    "crates/patchwright-verify",
 ]
 resolver = "2"
 
