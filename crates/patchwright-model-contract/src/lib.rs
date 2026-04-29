@@ -1,0 +1,345 @@
+#![forbid(unsafe_code)]
+
+use patchwright_core::action::Action;
+use patchwright_core::error::{PatchwrightError, Result};
+use patchwright_core::types::{
+    ContextPack, FileQuery, LineRange, ModelRequest, Patch, RepoPath, SearchQuery,
+};
+use serde_json::{json, Value};
+use std::fs;
+use std::path::Path;
+
+const USER_PROMPT_MAX_CHARS: usize = 24 * 1024;
+const USER_PROMPT_SECTION_MAX_CHARS: usize = 7 * 1024;
+const TRUNCATION_MARKER: &str = "\n...[truncated]";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prompt {
+    pub system: String,
+    pub user: String,
+}
+
+pub fn build_prompt(request: &ModelRequest) -> Prompt {
+    Prompt {
+        system: system_prompt().to_owned(),
+        user: user_prompt(request),
+    }
+}
+
+pub fn build_openai_prompt(request: &ModelRequest, model: &str) -> Value {
+    let prompt = build_prompt(request);
+    json!({
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": prompt.system,
+            },
+            {
+                "role": "user",
+                "content": prompt.user,
+            }
+        ]
+    })
+}
+
+pub fn render_exec_prompt(request: &ModelRequest) -> String {
+    let prompt = build_prompt(request);
+    format!(
+        "{}\n\nYou are running as a model provider transport. Do not edit files, run commands, or claim success. Return one final JSON object that matches the supplied schema.\n\n{}",
+        prompt.system, prompt.user
+    )
+}
+
+pub fn action_output_schema() -> Value {
+    json!({
+        "oneOf": [
+            object_schema(
+                [("action", json!({"const": "read_file"})), ("path", json!({"type": "string"}))],
+                ["action", "path"],
+                [("start", json!({"type": "integer", "minimum": 1})), ("end", json!({"type": "integer", "minimum": 1}))]
+            ),
+            object_schema(
+                [("action", json!({"const": "search_text"})), ("pattern", json!({"type": "string"}))],
+                ["action", "pattern"],
+                [("root", json!({"type": "string"}))]
+            ),
+            object_schema(
+                [("action", json!({"const": "list_files"}))],
+                ["action"],
+                [("root", json!({"type": "string"}))]
+            ),
+            object_schema(
+                [("action", json!({"const": "apply_patch"})), ("unified_diff", json!({"type": "string"}))],
+                ["action", "unified_diff"],
+                []
+            ),
+            object_schema([("action", json!({"const": "run_verifier"}))], ["action"], []),
+            object_schema([("action", json!({"const": "run_tests"}))], ["action"], []),
+            object_schema([("action", json!({"const": "run_typecheck"}))], ["action"], []),
+            object_schema([("action", json!({"const": "run_benchmark"}))], ["action"], []),
+            object_schema(
+                [("action", json!({"const": "finish"})), ("summary", json!({"type": "string"}))],
+                ["action", "summary"],
+                []
+            )
+        ]
+    })
+}
+
+pub fn write_action_output_schema(path: &Path) -> Result<()> {
+    let schema = serde_json::to_vec_pretty(&action_output_schema()).map_err(|error| {
+        PatchwrightError::Model(format!("failed to serialize action schema: {error}"))
+    })?;
+    fs::write(path, schema).map_err(PatchwrightError::from)
+}
+
+fn object_schema<const R: usize, const O: usize>(
+    required_properties: [(&str, Value); R],
+    required: [&str; R],
+    optional_properties: [(&str, Value); O],
+) -> Value {
+    let mut properties = serde_json::Map::new();
+    for (name, schema) in required_properties {
+        properties.insert(name.to_owned(), schema);
+    }
+    for (name, schema) in optional_properties {
+        properties.insert(name.to_owned(), schema);
+    }
+
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": required.to_vec(),
+        "properties": properties,
+    })
+}
+
+pub fn system_prompt() -> &'static str {
+    r#"Return only one JSON action. Do not include Markdown fences, commentary, or multiple actions.
+
+Verification decides success. Passing tests or your confidence are not enough unless the verifier accepts the work.
+
+Core rules:
+- Choose exactly one allowed action for the next step.
+- Inspect files before editing when the needed context is missing.
+- Apply the smallest patch that addresses the task and counterexamples.
+- After editing, run verification before finishing.
+- Finish only when verification has accepted the change.
+
+Allowed action examples:
+{"action":"read_file","path":"src/lib.rs","start":1,"end":120}
+{"action":"apply_patch","unified_diff":"diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,3 @@\n pub fn add(a: i32, b: i32) -> i32 {\n-    a - b\n+    a + b\n }\n"}
+{"action":"run_verifier"}
+{"action":"finish","summary":"fixed the failing add test"}"#
+}
+
+fn user_prompt(request: &ModelRequest) -> String {
+    let observations = format!("{:#?}", request.observations);
+    let counterexamples = format!("{:#?}", request.counterexamples);
+    let context = request.context.as_ref().map(render_context);
+
+    let mut sections = vec![format!(
+        "Task:\n{}",
+        truncate_chars(&request.task.text, USER_PROMPT_SECTION_MAX_CHARS)
+    )];
+    if let Some(context) = context {
+        sections.push(format!(
+            "Context:\n{}",
+            truncate_chars(&context, USER_PROMPT_SECTION_MAX_CHARS)
+        ));
+    }
+    sections.push(format!(
+        "Observations:\n{}",
+        truncate_chars(&observations, USER_PROMPT_SECTION_MAX_CHARS)
+    ));
+    sections.push(format!(
+        "Counterexamples:\n{}",
+        truncate_chars(&counterexamples, USER_PROMPT_SECTION_MAX_CHARS)
+    ));
+
+    let prompt = sections.join("\n\n");
+    truncate_chars(&prompt, USER_PROMPT_MAX_CHARS)
+}
+
+fn render_context(context: &ContextPack) -> String {
+    let mut output = String::new();
+
+    output.push_str("Ranked files:\n");
+    if context.files.is_empty() {
+        output.push_str("- none\n");
+    } else {
+        for file in &context.files {
+            output.push_str(&format!("- {} (score {})\n", file.path.0, file.score));
+        }
+    }
+
+    output.push_str("Likely tests:\n");
+    if context.likely_tests.is_empty() {
+        output.push_str("- none\n");
+    } else {
+        for path in &context.likely_tests {
+            output.push_str(&format!("- {}\n", path.0));
+        }
+    }
+
+    output.push_str("Manifests:\n");
+    if context.manifests.is_empty() {
+        output.push_str("- none\n");
+    } else {
+        for path in &context.manifests {
+            output.push_str(&format!("- {}\n", path.0));
+        }
+    }
+
+    output
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let marker_chars = TRUNCATION_MARKER.chars().count();
+    if max_chars <= marker_chars {
+        return TRUNCATION_MARKER.chars().take(max_chars).collect();
+    }
+
+    let mut truncated = value
+        .chars()
+        .take(max_chars - marker_chars)
+        .collect::<String>();
+    truncated.push_str(TRUNCATION_MARKER);
+    truncated
+}
+
+pub fn parse_action_json(content: &str) -> Result<Action> {
+    let value: Value = serde_json::from_str(content).map_err(|error| {
+        PatchwrightError::Model(format!("model action content was not valid JSON: {error}"))
+    })?;
+
+    let action = value.get("action").and_then(Value::as_str).ok_or_else(|| {
+        PatchwrightError::Model("model action JSON missing string field 'action'".to_string())
+    })?;
+
+    match action {
+        "read_file" => Ok(Action::ReadFile {
+            path: required_repo_path(&value, "path")?,
+            range: optional_line_range(&value)?,
+        }),
+        "search_text" => Ok(Action::SearchText(SearchQuery {
+            pattern: required_string_field(&value, "pattern")?.to_string(),
+            root: optional_repo_path(&value, "root")?,
+        })),
+        "list_files" => Ok(Action::ListFiles(FileQuery {
+            root: optional_repo_path(&value, "root")?,
+        })),
+        "apply_patch" => Ok(Action::ApplyPatch(Patch {
+            unified_diff: required_string_field(&value, "unified_diff")?.to_string(),
+        })),
+        "run_verifier" => Ok(Action::RunVerifier),
+        "run_tests" => Ok(Action::RunTests),
+        "run_typecheck" => Ok(Action::RunTypecheck),
+        "run_benchmark" => Ok(Action::RunBenchmark),
+        "finish" => {
+            let summary = required_string_field(&value, "summary")?;
+            Ok(Action::Finish {
+                summary: summary.to_string(),
+            })
+        }
+        unsupported => Err(PatchwrightError::Model(format!(
+            "unsupported model action '{unsupported}'"
+        ))),
+    }
+}
+
+fn required_string_field<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
+    value.get(field).and_then(Value::as_str).ok_or_else(|| {
+        PatchwrightError::Model(format!("model action JSON missing string field '{field}'"))
+    })
+}
+
+fn required_repo_path(value: &Value, field: &str) -> Result<RepoPath> {
+    let path = required_string_field(value, field)?;
+    normalized_relative_repo_path(path)
+}
+
+fn optional_repo_path(value: &Value, field: &str) -> Result<Option<RepoPath>> {
+    let Some(path) = value.get(field) else {
+        return Ok(None);
+    };
+    let path = path.as_str().ok_or_else(|| {
+        PatchwrightError::Model(format!(
+            "model action JSON field '{field}' must be a string"
+        ))
+    })?;
+    normalized_relative_repo_path(path).map(Some)
+}
+
+fn normalized_relative_repo_path(path: &str) -> Result<RepoPath> {
+    if path.trim().is_empty()
+        || path.starts_with('/')
+        || path.starts_with('\\')
+        || path.contains(':')
+        || has_windows_prefix(path)
+    {
+        return Err(relative_path_error(path));
+    }
+
+    let mut parts = Vec::new();
+    for part in path.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => return Err(relative_path_error(path)),
+            part => parts.push(part),
+        }
+    }
+
+    if parts.is_empty() {
+        return Err(relative_path_error(path));
+    }
+
+    Ok(RepoPath::new(parts.join("/")))
+}
+
+fn has_windows_prefix(path: &str) -> bool {
+    path.as_bytes().get(1).is_some_and(|byte| *byte == b':')
+}
+
+fn relative_path_error(path: &str) -> PatchwrightError {
+    PatchwrightError::Model(format!(
+        "model repo path must be a normalized relative path, got '{path}'"
+    ))
+}
+
+fn optional_line_range(value: &Value) -> Result<Option<LineRange>> {
+    match (value.get("start"), value.get("end")) {
+        (None, None) => Ok(None),
+        (Some(start), Some(end)) => {
+            let start = line_number(start, "start")?;
+            let end = line_number(end, "end")?;
+            if start == 0 || end < start {
+                return Err(PatchwrightError::Model(
+                    "read_file action JSON has invalid line range".to_string(),
+                ));
+            }
+            Ok(Some(LineRange { start, end }))
+        }
+        _ => Err(PatchwrightError::Model(
+            "read_file action JSON must include both 'start' and 'end' or neither".to_string(),
+        )),
+    }
+}
+
+fn line_number(value: &Value, field: &str) -> Result<usize> {
+    let number = value.as_u64().ok_or_else(|| {
+        PatchwrightError::Model(format!(
+            "read_file action JSON field '{field}' must be a number"
+        ))
+    })?;
+    usize::try_from(number).map_err(|_| {
+        PatchwrightError::Model(format!(
+            "read_file action JSON field '{field}' is too large"
+        ))
+    })
+}

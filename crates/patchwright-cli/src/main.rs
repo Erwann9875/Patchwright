@@ -1,13 +1,17 @@
 #![forbid(unsafe_code)]
 
-use patchwright_config::{PatchwrightConfig, RustConfig};
+use patchwright_config::{ModelProviderKind, PatchwrightConfig, RustConfig};
 use patchwright_core::agent::{Agent, SolveStatus};
+use patchwright_core::error::Result as PatchwrightResult;
 use patchwright_core::policy::Policy;
-use patchwright_core::traits::{LanguageAdapter, Verifier};
-use patchwright_core::types::{RepoView, TaskSpec, VerificationStatus};
+use patchwright_core::traits::{LanguageAdapter, ModelProvider, Verifier};
+use patchwright_core::types::{
+    ModelRequest, ModelResponse, RepoView, TaskSpec, VerificationStatus,
+};
 use patchwright_exec_local::{GitWorktreeSandbox, LocalExecution};
 use patchwright_index::BasicIndexer;
 use patchwright_lang_rust::RustAdapter;
+use patchwright_model_codex_cli::{CodexCliClient, CodexCliConfig};
 use patchwright_model_openai::{OpenAiCompatibleClient, OpenAiConfig};
 use patchwright_verify::PlanVerifier;
 use std::env;
@@ -59,25 +63,10 @@ where
 
 fn run_solve(args: &[String]) -> Result<(), String> {
     let options = solve_options(args)?;
+    let model = cli_model(&options)?;
 
-    let model_name = match options.model.clone() {
-        Some(model_name) => model_name,
-        None if options.dry_run => "dry-run".to_owned(),
-        None => return Err("solve real mode requires --model <name> or --dry-run".to_owned()),
-    };
     let sandbox = GitWorktreeSandbox::create(&options.repo).map_err(|error| error.to_string())?;
     let sandbox_repo = sandbox.root().to_path_buf();
-    let config = OpenAiConfig {
-        base_url: options.base_url,
-        model: model_name,
-        api_key_env: options.api_key_env,
-        timeout_seconds: 30,
-    };
-    let model = if options.dry_run {
-        OpenAiCompatibleClient::dry_run(config)
-    } else {
-        OpenAiCompatibleClient::new(config)
-    };
     let execution = LocalExecution::new(&sandbox_repo);
     let language_adapter = rust_adapter(&options.rust);
     let indexer = BasicIndexer::new(&sandbox_repo);
@@ -117,9 +106,9 @@ struct SolveOptions {
     repo: PathBuf,
     task: String,
     dry_run: bool,
-    model: Option<String>,
-    base_url: String,
-    api_key_env: String,
+    model_provider: ModelProviderKind,
+    openai: OpenAiConfig,
+    codex_cli: CodexCliConfig,
     max_steps: usize,
     require_patch: bool,
     max_changed_files: usize,
@@ -133,6 +122,7 @@ struct SolveFlags {
     repo: String,
     task: String,
     dry_run: bool,
+    model_provider: Option<ModelProviderKind>,
     model: Option<String>,
     base_url: Option<String>,
     api_key_env: Option<String>,
@@ -144,14 +134,39 @@ fn solve_options(args: &[String]) -> Result<SolveOptions, String> {
     let flags = SolveFlags::parse(args)?;
     let repo = accessible_repo_path(&flags.repo)?;
     let config = PatchwrightConfig::load(&repo).map_err(|error| error.to_string())?;
+    let model_provider = selected_model_provider(&flags, &config)?;
+    let openai_model = flags
+        .model
+        .clone()
+        .or_else(|| config.model.openai.model.clone())
+        .or_else(|| config.model.model.clone());
+    let codex_model = flags
+        .model
+        .clone()
+        .or_else(|| config.model.codex_cli.model.clone())
+        .or_else(|| config.model.model.clone());
 
     Ok(SolveOptions {
         repo,
         task: flags.task,
         dry_run: flags.dry_run,
-        model: flags.model.or(config.model.model),
-        base_url: flags.base_url.unwrap_or(config.model.base_url),
-        api_key_env: flags.api_key_env.unwrap_or(config.model.api_key_env),
+        model_provider,
+        openai: OpenAiConfig {
+            base_url: flags
+                .base_url
+                .or_else(|| config.model.openai.base_url.clone())
+                .unwrap_or(config.model.base_url),
+            model: openai_model.unwrap_or_default(),
+            api_key_env: flags
+                .api_key_env
+                .or_else(|| config.model.openai.api_key_env.clone())
+                .unwrap_or(config.model.api_key_env),
+            timeout_seconds: config.model.openai.timeout_seconds,
+        },
+        codex_cli: CodexCliConfig {
+            command: config.model.codex_cli.command,
+            model: codex_model,
+        },
         max_steps: flags.max_steps.unwrap_or(config.agent.max_steps),
         require_patch: if flags.info_only {
             false
@@ -177,6 +192,7 @@ impl SolveFlags {
         };
 
         let dry_run = has_flag(args, "--dry-run");
+        let model_provider = optional_model_provider(args)?;
         let model = optional_value_if_present(args, "--model")?;
 
         let max_steps = match value_after(args, "--max-steps") {
@@ -196,6 +212,7 @@ impl SolveFlags {
             repo,
             task,
             dry_run,
+            model_provider,
             model,
             base_url: optional_value_if_present(args, "--base-url")?,
             api_key_env: optional_value_if_present(args, "--api-key-env")?,
@@ -203,6 +220,29 @@ impl SolveFlags {
             info_only: has_flag(args, "--info-only"),
         })
     }
+}
+
+fn selected_model_provider(
+    flags: &SolveFlags,
+    config: &PatchwrightConfig,
+) -> Result<ModelProviderKind, String> {
+    if matches!(flags.model_provider, Some(ModelProviderKind::CodexCli))
+        && (flags.base_url.is_some() || flags.api_key_env.is_some())
+    {
+        return Err(
+            "OpenAI-compatible flags require --model-provider openai-compatible".to_owned(),
+        );
+    }
+
+    if let Some(provider) = flags.model_provider.clone() {
+        return Ok(provider);
+    }
+
+    if flags.base_url.is_some() || flags.api_key_env.is_some() {
+        return Ok(ModelProviderKind::OpenAiCompatible);
+    }
+
+    Ok(config.model.provider.clone())
 }
 
 fn validate_solve_args(args: &[String]) -> Result<(), String> {
@@ -245,7 +285,13 @@ fn validate_solve_args(args: &[String]) -> Result<(), String> {
 fn is_solve_value_flag(arg: &str) -> bool {
     matches!(
         arg,
-        "--repo" | "--task" | "--model" | "--base-url" | "--api-key-env" | "--max-steps"
+        "--repo"
+            | "--task"
+            | "--model-provider"
+            | "--model"
+            | "--base-url"
+            | "--api-key-env"
+            | "--max-steps"
     )
 }
 
@@ -258,8 +304,9 @@ fn run_config_check(args: &[String]) -> Result<String, String> {
     let config = PatchwrightConfig::load(&repo).map_err(|error| error.to_string())?;
 
     Ok(format!(
-        "config: ok\nmodel base_url: {}\nagent max_steps: {}\npolicy allowed_programs: {}",
-        config.model.base_url,
+        "config: ok\nmodel provider: {}\nmodel base_url: {}\nagent max_steps: {}\npolicy allowed_programs: {}",
+        model_provider_name(&config.model.provider),
+        config.model.openai.base_url.as_deref().unwrap_or(&config.model.base_url),
         config.agent.max_steps,
         config.policy.allowed_programs.join(",")
     ))
@@ -377,6 +424,47 @@ fn startup_average_micros(total_nanos: u128, iterations: u128) -> u128 {
     total_nanos / iterations / 1_000
 }
 
+enum CliModel {
+    OpenAi(OpenAiCompatibleClient),
+    CodexCli(CodexCliClient),
+}
+
+impl ModelProvider for CliModel {
+    fn propose_action(&mut self, request: ModelRequest) -> PatchwrightResult<ModelResponse> {
+        match self {
+            Self::OpenAi(model) => model.propose_action(request),
+            Self::CodexCli(model) => model.propose_action(request),
+        }
+    }
+}
+
+fn cli_model(options: &SolveOptions) -> Result<CliModel, String> {
+    if options.dry_run {
+        let mut config = options.openai.clone();
+        if config.model.is_empty() {
+            config.model = "dry-run".to_owned();
+        }
+        return Ok(CliModel::OpenAi(OpenAiCompatibleClient::dry_run(config)));
+    }
+
+    match options.model_provider {
+        ModelProviderKind::CodexCli => Ok(CliModel::CodexCli(CodexCliClient::new(
+            options.codex_cli.clone(),
+        ))),
+        ModelProviderKind::OpenAiCompatible => {
+            if options.openai.model.is_empty() {
+                return Err(
+                    "OpenAI-compatible solve requires --model <name> or model.openai.model"
+                        .to_owned(),
+                );
+            }
+            Ok(CliModel::OpenAi(OpenAiCompatibleClient::new(
+                options.openai.clone(),
+            )))
+        }
+    }
+}
+
 fn rust_adapter(config: &RustConfig) -> RustAdapter {
     RustAdapter::new(config.fmt, config.check, config.test, config.clippy)
 }
@@ -398,6 +486,30 @@ fn optional_value_if_present(args: &[String], flag: &str) -> Result<Option<Strin
     }
 }
 
+fn optional_model_provider(args: &[String]) -> Result<Option<ModelProviderKind>, String> {
+    let Some(value) = value_after(args, "--model-provider") else {
+        if has_flag(args, "--model-provider") {
+            return Err("solve requires --model-provider <name>".to_owned());
+        }
+        return Ok(None);
+    };
+
+    match value.as_str() {
+        "codex-cli" => Ok(Some(ModelProviderKind::CodexCli)),
+        "openai-compatible" => Ok(Some(ModelProviderKind::OpenAiCompatible)),
+        _ => Err(format!(
+            "unknown model provider: {value}; expected codex-cli or openai-compatible"
+        )),
+    }
+}
+
+fn model_provider_name(provider: &ModelProviderKind) -> &'static str {
+    match provider {
+        ModelProviderKind::CodexCli => "codex-cli",
+        ModelProviderKind::OpenAiCompatible => "openai-compatible",
+    }
+}
+
 fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
 }
@@ -413,14 +525,14 @@ fn accessible_repo_path(path: &str) -> Result<PathBuf, String> {
 
 fn print_help() {
     println!(
-        "patchwright\n\nUSAGE:\n    patchwright --version\n    patchwright status\n    patchwright config check [--repo <path>]\n    patchwright bench startup\n    patchwright solve --repo <path> --task <text> [--dry-run] [--model <name>] [--base-url <url>] [--api-key-env <name>] [--max-steps <n>] [--info-only]\n    patchwright verify --repo <path>"
+        "patchwright\n\nUSAGE:\n    patchwright --version\n    patchwright status\n    patchwright config check [--repo <path>]\n    patchwright bench startup\n    patchwright solve --repo <path> --task <text> [--dry-run] [--model-provider codex-cli|openai-compatible] [--model <name>] [--base-url <url>] [--api-key-env <name>] [--max-steps <n>] [--info-only]\n    patchwright verify --repo <path>"
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::run;
-    use patchwright_config::RustConfig;
+    use patchwright_config::{ModelProviderKind, RustConfig};
     use patchwright_core::traits::LanguageAdapter;
     use patchwright_core::types::{RepoView, TaskSpec};
     use patchwright_test_support::TempRepo;
@@ -476,6 +588,7 @@ mod tests {
         .unwrap();
 
         assert!(output.contains("config: ok"));
+        assert!(output.contains("model provider: codex-cli"));
         assert!(output.contains("model base_url: http://127.0.0.1:8080/v1"));
         assert!(output.contains("agent max_steps: 9"));
         assert!(output.contains("policy allowed_programs: cargo,rustc"));
@@ -590,8 +703,13 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(options.model, Some("configured-dry-run".to_owned()));
-        assert_eq!(options.base_url, "http://127.0.0.1:9/v1");
+        assert_eq!(options.model_provider, ModelProviderKind::CodexCli);
+        assert_eq!(options.openai.model, "configured-dry-run");
+        assert_eq!(options.openai.base_url, "http://127.0.0.1:9/v1");
+        assert_eq!(
+            options.codex_cli.model,
+            Some("configured-dry-run".to_owned())
+        );
         assert_eq!(options.max_steps, 1);
         assert!(!options.require_patch);
         assert_eq!(options.max_changed_files, 2);
@@ -635,11 +753,29 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(options.model, Some("flag-model".to_owned()));
-        assert_eq!(options.base_url, "http://flag.invalid/v1");
-        assert_eq!(options.api_key_env, "FLAG_KEY");
+        assert_eq!(options.model_provider, ModelProviderKind::OpenAiCompatible);
+        assert_eq!(options.openai.model, "flag-model");
+        assert_eq!(options.openai.base_url, "http://flag.invalid/v1");
+        assert_eq!(options.openai.api_key_env, "FLAG_KEY");
         assert_eq!(options.max_steps, 8);
         assert_eq!(options.allowed_programs, vec!["cargo", "rustc"]);
+    }
+
+    #[test]
+    fn solve_defaults_to_codex_cli_provider_without_api_key_config() {
+        let repo = TempRepo::new("cli-solve-defaults-to-codex-cli");
+        let options = super::solve_options(&[
+            "solve".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+            "--task".to_owned(),
+            "summarize".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.model_provider, ModelProviderKind::CodexCli);
+        assert_eq!(options.codex_cli.command, "codex");
+        assert_eq!(options.codex_cli.model, None);
     }
 
     #[test]
@@ -666,18 +802,40 @@ mod tests {
     }
 
     #[test]
-    fn solve_real_mode_requires_model_name() {
+    fn openai_compatible_real_mode_requires_model_name() {
         let result = run([
             "solve".to_owned(),
             "--repo".to_owned(),
             ".".to_owned(),
             "--task".to_owned(),
             "summarize".to_owned(),
+            "--model-provider".to_owned(),
+            "openai-compatible".to_owned(),
         ]);
 
         assert_eq!(
             result,
-            Err("solve real mode requires --model <name> or --dry-run".to_owned())
+            Err("OpenAI-compatible solve requires --model <name> or model.openai.model".to_owned())
+        );
+    }
+
+    #[test]
+    fn solve_rejects_openai_flags_with_explicit_codex_provider() {
+        let result = run([
+            "solve".to_owned(),
+            "--repo".to_owned(),
+            ".".to_owned(),
+            "--task".to_owned(),
+            "summarize".to_owned(),
+            "--model-provider".to_owned(),
+            "codex-cli".to_owned(),
+            "--base-url".to_owned(),
+            "http://example.invalid/v1".to_owned(),
+        ]);
+
+        assert_eq!(
+            result,
+            Err("OpenAI-compatible flags require --model-provider openai-compatible".to_owned())
         );
     }
 

@@ -41,6 +41,18 @@ impl PatchwrightConfig {
     }
 
     fn validate(&self) -> Result<()> {
+        if self.model.codex_cli.command.trim().is_empty() {
+            return Err(PatchwrightError::InvalidInput(
+                "model.codex_cli.command must not be empty".to_owned(),
+            ));
+        }
+
+        if self.model.openai.timeout_seconds == 0 {
+            return Err(PatchwrightError::InvalidInput(
+                "model.openai.timeout_seconds must be greater than 0".to_owned(),
+            ));
+        }
+
         if self.agent.max_steps == 0 {
             return Err(PatchwrightError::InvalidInput(
                 "agent.max_steps must be greater than 0".to_owned(),
@@ -72,17 +84,68 @@ impl PatchwrightConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
+    pub provider: ModelProviderKind,
     pub base_url: String,
     pub model: Option<String>,
     pub api_key_env: String,
+    pub codex_cli: CodexCliModelConfig,
+    pub openai: OpenAiModelConfig,
 }
 
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
+            provider: ModelProviderKind::default(),
             base_url: "https://api.openai.com/v1".to_owned(),
             model: None,
             api_key_env: "OPENAI_API_KEY".to_owned(),
+            codex_cli: CodexCliModelConfig::default(),
+            openai: OpenAiModelConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub enum ModelProviderKind {
+    #[serde(rename = "codex-cli")]
+    #[default]
+    CodexCli,
+    #[serde(rename = "openai-compatible")]
+    OpenAiCompatible,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CodexCliModelConfig {
+    pub command: String,
+    pub model: Option<String>,
+}
+
+impl Default for CodexCliModelConfig {
+    fn default() -> Self {
+        Self {
+            command: "codex".to_owned(),
+            model: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OpenAiModelConfig {
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub api_key_env: Option<String>,
+    pub timeout_seconds: u64,
+}
+
+impl Default for OpenAiModelConfig {
+    fn default() -> Self {
+        Self {
+            base_url: None,
+            model: None,
+            api_key_env: None,
+            timeout_seconds: 30,
         }
     }
 }

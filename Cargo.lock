@@ -266,6 +266,7 @@ dependencies = [
  "patchwright-exec-local",
  "patchwright-index",
  "patchwright-lang-rust",
+ "patchwright-model-codex-cli",
  "patchwright-model-openai",
  "patchwright-test-support",
  "patchwright-verify",
@@ -310,10 +311,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "patchwright-model-codex-cli"
+version = "0.1.0"
+dependencies = [
+ "patchwright-core",
+ "patchwright-model-contract",
+ "patchwright-test-support",
+]
+
+[[package]]
+name = "patchwright-model-contract"
+version = "0.1.0"
+dependencies = [
+ "patchwright-core",
+ "serde_json",
+]
+
+[[package]]
 name = "patchwright-model-openai"
 version = "0.1.0"
 dependencies = [
  "patchwright-core",
+ "patchwright-model-contract",
  "serde_json",
  "ureq",
 ]

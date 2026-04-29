@@ -1,4 +1,4 @@
-use patchwright_config::PatchwrightConfig;
+use patchwright_config::{ModelProviderKind, PatchwrightConfig};
 use patchwright_core::PatchwrightError;
 use std::fs;
 
@@ -6,9 +6,16 @@ use std::fs;
 fn defaults_match_v0_1_plan() {
     let config = PatchwrightConfig::default();
 
+    assert_eq!(config.model.provider, ModelProviderKind::CodexCli);
     assert_eq!(config.model.base_url, "https://api.openai.com/v1");
     assert_eq!(config.model.model, None);
     assert_eq!(config.model.api_key_env, "OPENAI_API_KEY");
+    assert_eq!(config.model.codex_cli.command, "codex");
+    assert_eq!(config.model.codex_cli.model, None);
+    assert_eq!(config.model.openai.base_url, None);
+    assert_eq!(config.model.openai.model, None);
+    assert_eq!(config.model.openai.api_key_env, None);
+    assert_eq!(config.model.openai.timeout_seconds, 30);
     assert_eq!(config.agent.max_steps, 30);
     assert!(config.agent.require_patch);
     assert_eq!(config.agent.max_changed_files, 5);
@@ -25,9 +32,20 @@ fn parses_partial_toml_over_defaults() {
     let config = PatchwrightConfig::from_toml_str(
         r#"
 [model]
+provider = "openai-compatible"
 base_url = "http://127.0.0.1:8080/v1"
 model = "gpt-test"
 api_key_env = "PATCHWRIGHT_TEST_KEY"
+
+[model.codex_cli]
+command = "codex-test"
+model = "codex-test-model"
+
+[model.openai]
+base_url = "http://nested.invalid/v1"
+model = "nested-openai-model"
+api_key_env = "NESTED_OPENAI_KEY"
+timeout_seconds = 9
 
 [agent]
 max_steps = 7
@@ -42,9 +60,28 @@ clippy = true
     )
     .unwrap();
 
+    assert_eq!(config.model.provider, ModelProviderKind::OpenAiCompatible);
     assert_eq!(config.model.base_url, "http://127.0.0.1:8080/v1");
     assert_eq!(config.model.model, Some("gpt-test".to_owned()));
     assert_eq!(config.model.api_key_env, "PATCHWRIGHT_TEST_KEY");
+    assert_eq!(config.model.codex_cli.command, "codex-test");
+    assert_eq!(
+        config.model.codex_cli.model,
+        Some("codex-test-model".to_owned())
+    );
+    assert_eq!(
+        config.model.openai.base_url,
+        Some("http://nested.invalid/v1".to_owned())
+    );
+    assert_eq!(
+        config.model.openai.model,
+        Some("nested-openai-model".to_owned())
+    );
+    assert_eq!(
+        config.model.openai.api_key_env,
+        Some("NESTED_OPENAI_KEY".to_owned())
+    );
+    assert_eq!(config.model.openai.timeout_seconds, 9);
     assert_eq!(config.agent.max_steps, 7);
     assert!(!config.agent.require_patch);
     assert_eq!(config.agent.max_changed_files, 5);
@@ -78,6 +115,21 @@ fn rejects_zero_diff_limits() {
     assert!(matches!(
         inserted_lines,
         Err(PatchwrightError::InvalidInput(message)) if message.contains("agent.max_inserted_lines")
+    ));
+}
+
+#[test]
+fn rejects_empty_codex_command_and_zero_openai_timeout() {
+    let command = PatchwrightConfig::from_toml_str("[model.codex_cli]\ncommand = \"\"\n");
+    let timeout = PatchwrightConfig::from_toml_str("[model.openai]\ntimeout_seconds = 0\n");
+
+    assert!(matches!(
+        command,
+        Err(PatchwrightError::InvalidInput(message)) if message.contains("model.codex_cli.command")
+    ));
+    assert!(matches!(
+        timeout,
+        Err(PatchwrightError::InvalidInput(message)) if message.contains("model.openai.timeout_seconds")
     ));
 }
 
