@@ -6,12 +6,12 @@ use patchwright_core::traits::{
     ExecutionBackend, Indexer, LanguageAdapter, ModelProvider, Verifier,
 };
 use patchwright_core::types::{
-    CommandSpec, Counterexample, DetectionScore, DiffSummary, FileQuery, FileSlice, LineRange,
-    ModelRequest, ModelResponse, Patch, PatchId, PolicyEvent, RepoPath, RepoView, RunReport,
-    ScoredPath, SearchQuery, SearchResults, SnapshotId, TaskSpec, VerificationReport,
+    CommandSpec, ContextPack, Counterexample, DetectionScore, DiffSummary, FileQuery, FileSlice,
+    LineRange, ModelRequest, ModelResponse, Patch, PatchId, PolicyEvent, RepoPath, RepoView,
+    RunReport, ScoredPath, SearchQuery, SearchResults, SnapshotId, TaskSpec, VerificationReport,
     VerificationStatus, VerifierPlan,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -26,6 +26,20 @@ impl ModelProvider for ScriptedModel {
         }
         Ok(ModelResponse {
             action: self.actions.remove(0),
+        })
+    }
+}
+
+struct RecordingModel {
+    requests: Rc<RefCell<Vec<ModelRequest>>>,
+    action: Action,
+}
+
+impl ModelProvider for RecordingModel {
+    fn propose_action(&mut self, request: ModelRequest) -> Result<ModelResponse> {
+        self.requests.borrow_mut().push(request);
+        Ok(ModelResponse {
+            action: self.action.clone(),
         })
     }
 }
@@ -127,6 +141,27 @@ impl Indexer for EmptyIndex {
     }
 }
 
+struct ContextIndex;
+
+impl Indexer for ContextIndex {
+    fn list_files(&self, _query: FileQuery) -> Result<Vec<ScoredPath>> {
+        Ok(vec![ScoredPath {
+            path: RepoPath::new("src/lib.rs"),
+            score: 7,
+        }])
+    }
+
+    fn search_text(&self, _query: SearchQuery) -> Result<SearchResults> {
+        Ok(SearchResults {
+            matches: Vec::new(),
+        })
+    }
+
+    fn symbols(&self, _path: &RepoPath) -> Result<Vec<patchwright_core::types::Symbol>> {
+        Ok(Vec::new())
+    }
+}
+
 struct AcceptingVerifier;
 
 impl Verifier for AcceptingVerifier {
@@ -156,6 +191,29 @@ impl Verifier for ForbiddenDiffVerifier {
             diff_summary: DiffSummary {
                 changed_files: vec![RepoPath::new(".env")],
                 inserted_lines: 1,
+                deleted_lines: 0,
+            },
+            policy_events: Vec::new(),
+        })
+    }
+}
+
+struct OversizedDiffVerifier;
+
+impl Verifier for OversizedDiffVerifier {
+    fn verify(
+        &mut self,
+        _execution: &mut dyn ExecutionBackend,
+        _plan: &VerifierPlan,
+        _policy: &Policy,
+    ) -> Result<VerificationReport> {
+        Ok(VerificationReport {
+            status: VerificationStatus::Accepted,
+            checks: Vec::new(),
+            counterexamples: Vec::new(),
+            diff_summary: DiffSummary {
+                changed_files: vec![RepoPath::new("src/lib.rs"), RepoPath::new("src/main.rs")],
+                inserted_lines: 11,
                 deleted_lines: 0,
             },
             policy_events: Vec::new(),
@@ -220,7 +278,7 @@ fn accepts_patch_after_successful_verification() {
         .expect("agent should build");
 
     let report = agent
-        .solve(TaskSpec::from_text(PathBuf::from("."), "change code"))
+        .solve(TaskSpec::code_change(PathBuf::from("."), "change code"))
         .expect("simulation should solve");
 
     assert_eq!(report.status, SolveStatus::Accepted);
@@ -313,6 +371,52 @@ fn accepted_verification_with_forbidden_diff_is_rejected_and_reverted() {
             detail: "forbidden files modified: .env".to_owned(),
         }]
     );
+}
+
+#[test]
+fn accepted_verification_with_oversized_diff_is_rejected_and_reverted() {
+    let reverted = Rc::new(Cell::new(0));
+    let model = ScriptedModel {
+        actions: vec![Action::ApplyPatch(Patch {
+            unified_diff: "diff --git a/src/lib.rs b/src/lib.rs\n".to_owned(),
+        })],
+    };
+
+    let mut agent = Agent::builder()
+        .model(model)
+        .execution(FakeExecution {
+            reverted: Rc::clone(&reverted),
+            fail_apply_patch: false,
+        })
+        .language_adapter(FakeLanguage)
+        .indexer(EmptyIndex)
+        .verifier(OversizedDiffVerifier)
+        .policy(Policy::FullShellAutonomous)
+        .max_changed_files(1)
+        .max_inserted_lines(10)
+        .max_steps(1)
+        .try_build()
+        .expect("agent should build");
+
+    let report = agent
+        .solve(TaskSpec::from_text(PathBuf::from("."), "change code"))
+        .expect("simulation should return rejected attempt");
+
+    assert_eq!(report.status, SolveStatus::BudgetExhausted);
+    assert_eq!(reverted.get(), 1);
+    assert_eq!(report.attempts.len(), 1);
+    assert_eq!(
+        report.attempts[0].verification.status,
+        VerificationStatus::Rejected
+    );
+    assert!(report
+        .counterexamples
+        .iter()
+        .any(|counterexample| { counterexample.detail == "diff changed 2 files; limit is 1" }));
+    assert!(report
+        .counterexamples
+        .iter()
+        .any(|counterexample| { counterexample.detail == "diff inserted 11 lines; limit is 10" }));
 }
 
 #[test]
@@ -427,6 +531,171 @@ fn finish_action_returns_finished() {
 
     let report = agent
         .solve(TaskSpec::from_text(PathBuf::from("."), "inspect code"))
+        .expect("simulation should finish");
+
+    assert_eq!(report.status, SolveStatus::Finished);
+    assert_eq!(report.summary, "no change needed");
+    assert!(matches!(
+        report.observations.last(),
+        Some(Observation::Finished(summary)) if summary == "no change needed"
+    ));
+}
+
+#[test]
+fn model_request_includes_index_context_pack() {
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let model = RecordingModel {
+        requests: Rc::clone(&requests),
+        action: Action::Finish {
+            summary: "done".to_owned(),
+        },
+    };
+
+    let mut agent = Agent::builder()
+        .model(model)
+        .execution(FakeExecution::default())
+        .language_adapter(FakeLanguage)
+        .indexer(ContextIndex)
+        .verifier(AcceptingVerifier)
+        .policy(Policy::SafeStructuredOnly)
+        .max_steps(1)
+        .try_build()
+        .expect("agent should build");
+
+    agent
+        .solve(TaskSpec::from_text(PathBuf::from("."), "inspect code"))
+        .expect("simulation should finish");
+
+    let requests = requests.borrow();
+    let context = requests
+        .first()
+        .and_then(|request| request.context.as_ref())
+        .expect("model request should include index context");
+
+    assert_eq!(
+        context,
+        &ContextPack {
+            files: vec![ScoredPath {
+                path: RepoPath::new("src/lib.rs"),
+                score: 7,
+            }],
+            likely_tests: Vec::new(),
+            manifests: Vec::new(),
+            recent_observations: Vec::new(),
+            counterexamples: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn default_context_pack_keeps_last_eight_observations_newest_first() {
+    let observations = (1..=10)
+        .map(|index| Observation::Error(format!("observation-{index}")))
+        .collect::<Vec<_>>();
+    let task = TaskSpec::from_text(PathBuf::from("."), "inspect code");
+
+    let pack = EmptyIndex
+        .context_pack(&task, &observations, &[])
+        .expect("default context pack should build");
+
+    let expected = (3..=10)
+        .rev()
+        .map(|index| Observation::Error(format!("observation-{index}")))
+        .collect::<Vec<_>>();
+    assert_eq!(pack.recent_observations, expected);
+}
+
+#[test]
+fn code_change_task_rejects_immediate_finish() {
+    let model = ScriptedModel {
+        actions: vec![Action::Finish {
+            summary: "done".to_owned(),
+        }],
+    };
+
+    let mut agent = Agent::builder()
+        .model(model)
+        .execution(FakeExecution::default())
+        .language_adapter(FakeLanguage)
+        .indexer(EmptyIndex)
+        .verifier(AcceptingVerifier)
+        .policy(Policy::SafeStructuredOnly)
+        .max_steps(1)
+        .try_build()
+        .expect("agent should build");
+
+    let report = agent
+        .solve(TaskSpec::code_change(PathBuf::from("."), "change code"))
+        .expect("simulation should return patch-required report");
+
+    assert_eq!(report.status, SolveStatus::BudgetExhausted);
+    assert_eq!(report.summary, "step budget exhausted");
+    assert!(report.attempts.is_empty());
+    assert!(report.observations.iter().any(
+        |observation| matches!(observation, Observation::Error(message) if message.contains("patch required"))
+    ));
+}
+
+#[test]
+fn code_change_task_can_recover_after_invalid_finish() {
+    let model = ScriptedModel {
+        actions: vec![
+            Action::Finish {
+                summary: "done".to_owned(),
+            },
+            Action::ApplyPatch(Patch {
+                unified_diff: "diff --git a/a b/a\n".to_owned(),
+            }),
+        ],
+    };
+
+    let mut agent = Agent::builder()
+        .model(model)
+        .execution(FakeExecution::default())
+        .language_adapter(FakeLanguage)
+        .indexer(EmptyIndex)
+        .verifier(AcceptingVerifier)
+        .policy(Policy::SafeStructuredOnly)
+        .max_steps(3)
+        .try_build()
+        .expect("agent should build");
+
+    let report = agent
+        .solve(TaskSpec::code_change(PathBuf::from("."), "change code"))
+        .expect("simulation should recover and accept patch");
+
+    assert_eq!(report.status, SolveStatus::Accepted);
+    assert_eq!(report.attempts.len(), 1);
+    assert_eq!(
+        report.attempts[0].verification.status,
+        VerificationStatus::Accepted
+    );
+    assert!(report.observations.iter().any(
+        |observation| matches!(observation, Observation::Error(message) if message.contains("patch required"))
+    ));
+}
+
+#[test]
+fn info_only_task_can_finish_without_patch() {
+    let model = ScriptedModel {
+        actions: vec![Action::Finish {
+            summary: "no change needed".to_owned(),
+        }],
+    };
+
+    let mut agent = Agent::builder()
+        .model(model)
+        .execution(FakeExecution::default())
+        .language_adapter(FakeLanguage)
+        .indexer(EmptyIndex)
+        .verifier(AcceptingVerifier)
+        .policy(Policy::SafeStructuredOnly)
+        .max_steps(3)
+        .try_build()
+        .expect("agent should build");
+
+    let report = agent
+        .solve(TaskSpec::from_text(PathBuf::from("."), "summarize"))
         .expect("simulation should finish");
 
     assert_eq!(report.status, SolveStatus::Finished);

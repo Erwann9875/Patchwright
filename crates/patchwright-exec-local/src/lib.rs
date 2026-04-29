@@ -460,6 +460,9 @@ fn diff_summary(root: &Path) -> Result<DiffSummary> {
         }
 
         let normalized = normalize_git_status_path(path);
+        if is_generated_artifact_path(&normalized) {
+            continue;
+        }
         if status_code == "??" {
             inserted_lines += count_text_lines(&root.join(&normalized))?;
         }
@@ -479,6 +482,13 @@ fn normalize_git_status_path(path: &str) -> String {
         .map(|(_, new_path)| new_path)
         .unwrap_or(path);
     path.trim_matches('"').replace('\\', "/")
+}
+
+fn is_generated_artifact_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    let trimmed = normalized.trim_matches('/');
+
+    trimmed == "target" || trimmed.starts_with("target/")
 }
 
 fn count_text_lines(path: &Path) -> Result<usize> {

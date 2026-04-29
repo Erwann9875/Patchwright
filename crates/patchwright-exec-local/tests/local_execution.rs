@@ -132,6 +132,24 @@ index aac65dc..6320cd2 100644
 }
 
 #[test]
+fn diff_summary_ignores_rust_target_build_artifacts() -> Result<()> {
+    let repo = TempRepo::new("exec-local-diff-summary-ignores-target");
+    repo.write("src/lib.rs", "old\n");
+    repo.commit_all("seed");
+    repo.write("src/lib.rs", "new\n");
+    repo.write("target/debug/generated.txt", "generated\nartifact\n");
+
+    let execution = LocalExecution::new(repo.root());
+    let summary = execution.diff_summary()?;
+
+    assert_eq!(summary.changed_files, vec![RepoPath::new("src/lib.rs")]);
+    assert_eq!(summary.inserted_lines, 1);
+    assert_eq!(summary.deleted_lines, 1);
+
+    Ok(())
+}
+
+#[test]
 fn sandbox_creation_rejects_dirty_source_without_removing_user_files() -> Result<()> {
     let repo = TempRepo::new("exec-local-sandbox-rejects-dirty-source");
     repo.write("notes.txt", "committed\n");

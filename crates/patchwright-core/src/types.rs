@@ -95,6 +95,7 @@ pub struct PatchId(pub String);
 pub struct TaskSpec {
     pub text: String,
     pub repo_path: PathBuf,
+    pub require_patch: bool,
 }
 
 impl TaskSpec {
@@ -102,7 +103,17 @@ impl TaskSpec {
         Self {
             text: text.into(),
             repo_path,
+            require_patch: false,
         }
+    }
+
+    pub fn code_change(repo_path: PathBuf, text: impl Into<String>) -> Self {
+        Self::from_text(repo_path, text).with_require_patch(true)
+    }
+
+    pub fn with_require_patch(mut self, require_patch: bool) -> Self {
+        self.require_patch = require_patch;
+        self
     }
 }
 
@@ -201,6 +212,15 @@ pub struct FileQuery {
     pub root: Option<RepoPath>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ContextPack {
+    pub files: Vec<ScoredPath>,
+    pub likely_tests: Vec<RepoPath>,
+    pub manifests: Vec<RepoPath>,
+    pub recent_observations: Vec<Observation>,
+    pub counterexamples: Vec<Counterexample>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Symbol {
     pub name: String,
@@ -219,6 +239,7 @@ pub struct ModelRequest {
     pub task: TaskSpec,
     pub observations: Vec<Observation>,
     pub counterexamples: Vec<Counterexample>,
+    pub context: Option<ContextPack>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

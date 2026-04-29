@@ -10,6 +10,7 @@ name = "patchwright"
 path = "src/main.rs"
 
 [dependencies]
+patchwright-config = { path = "../patchwright-config" }
 patchwright-core = { path = "../patchwright-core" }
 patchwright-exec-local = { path = "../patchwright-exec-local" }
 patchwright-index = { path = "../patchwright-index" }
