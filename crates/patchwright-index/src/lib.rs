@@ -20,9 +20,7 @@ impl BasicIndexer {
         let root = fs::canonicalize(root.as_ref())
             .unwrap_or_else(|error| panic!("failed to canonicalize repo root: {error}"));
 
-        Self {
-            root,
-        }
+        Self { root }
     }
 }
 
@@ -92,7 +90,11 @@ impl BasicIndexer {
         }
     }
 
-    fn walk_files(&self, directory: &Path, visit: &mut dyn FnMut(&Path) -> Result<()>) -> Result<()> {
+    fn walk_files(
+        &self,
+        directory: &Path,
+        visit: &mut dyn FnMut(&Path) -> Result<()>,
+    ) -> Result<()> {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
             let file_name = entry.file_name();

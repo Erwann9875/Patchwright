@@ -1,6 +1,6 @@
-use patchwright_core::PatchwrightError;
 use patchwright_core::traits::Indexer;
 use patchwright_core::types::{FileQuery, RepoPath, SearchQuery};
+use patchwright_core::PatchwrightError;
 use patchwright_index::BasicIndexer;
 use patchwright_test_support::TempRepo;
 use std::fs;
@@ -59,8 +59,11 @@ fn skips_git_directory_when_listing_and_searching() {
 fn ignores_non_utf8_files_when_searching() {
     let repo = TempRepo::new("basic-index-non-utf8");
     repo.write("src/lib.rs", "pub fn target() {}\n");
-    fs::write(repo.root().join("binary.dat"), [0xff, 0xfe, b't', b'a', b'r', b'g', b'e', b't'])
-        .unwrap();
+    fs::write(
+        repo.root().join("binary.dat"),
+        [0xff, 0xfe, b't', b'a', b'r', b'g', b'e', b't'],
+    )
+    .unwrap();
 
     let indexer = BasicIndexer::new(repo.root());
 

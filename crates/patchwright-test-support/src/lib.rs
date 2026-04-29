@@ -18,7 +18,10 @@ impl TempRepo {
         let root = create_unique_repo_dir(name);
 
         run_git(&root, ["init"]);
-        run_git(&root, ["config", "user.email", "patchwright@example.invalid"]);
+        run_git(
+            &root,
+            ["config", "user.email", "patchwright@example.invalid"],
+        );
         run_git(&root, ["config", "user.name", "Patchwright Tests"]);
 
         Self { root }
@@ -33,9 +36,8 @@ impl TempRepo {
 
         let path = self.root.join(relative);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap_or_else(|error| {
-                panic!("failed to create {}: {error}", parent.display())
-            });
+            fs::create_dir_all(parent)
+                .unwrap_or_else(|error| panic!("failed to create {}: {error}", parent.display()));
         }
         fs::write(&path, content)
             .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
@@ -50,10 +52,8 @@ impl TempRepo {
 fn create_unique_repo_dir(name: &str) -> PathBuf {
     for _ in 0..100 {
         let id = NEXT_REPO_ID.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "patchwright-{name}-{}-{id}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("patchwright-{name}-{}-{id}", std::process::id()));
 
         match fs::create_dir(&root) {
             Ok(()) => return root,
@@ -86,7 +86,10 @@ impl Drop for TempRepo {
     fn drop(&mut self) {
         if self.root.exists() {
             fs::remove_dir_all(&self.root).unwrap_or_else(|error| {
-                panic!("failed to remove temp repo {}: {error}", self.root.display())
+                panic!(
+                    "failed to remove temp repo {}: {error}",
+                    self.root.display()
+                )
             });
         }
     }
