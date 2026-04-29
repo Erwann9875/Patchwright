@@ -198,6 +198,29 @@ impl Verifier for ForbiddenDiffVerifier {
     }
 }
 
+struct OversizedDiffVerifier;
+
+impl Verifier for OversizedDiffVerifier {
+    fn verify(
+        &mut self,
+        _execution: &mut dyn ExecutionBackend,
+        _plan: &VerifierPlan,
+        _policy: &Policy,
+    ) -> Result<VerificationReport> {
+        Ok(VerificationReport {
+            status: VerificationStatus::Accepted,
+            checks: Vec::new(),
+            counterexamples: Vec::new(),
+            diff_summary: DiffSummary {
+                changed_files: vec![RepoPath::new("src/lib.rs"), RepoPath::new("src/main.rs")],
+                inserted_lines: 11,
+                deleted_lines: 0,
+            },
+            policy_events: Vec::new(),
+        })
+    }
+}
+
 struct RejectingVerifier;
 
 impl Verifier for RejectingVerifier {
@@ -348,6 +371,52 @@ fn accepted_verification_with_forbidden_diff_is_rejected_and_reverted() {
             detail: "forbidden files modified: .env".to_owned(),
         }]
     );
+}
+
+#[test]
+fn accepted_verification_with_oversized_diff_is_rejected_and_reverted() {
+    let reverted = Rc::new(Cell::new(0));
+    let model = ScriptedModel {
+        actions: vec![Action::ApplyPatch(Patch {
+            unified_diff: "diff --git a/src/lib.rs b/src/lib.rs\n".to_owned(),
+        })],
+    };
+
+    let mut agent = Agent::builder()
+        .model(model)
+        .execution(FakeExecution {
+            reverted: Rc::clone(&reverted),
+            fail_apply_patch: false,
+        })
+        .language_adapter(FakeLanguage)
+        .indexer(EmptyIndex)
+        .verifier(OversizedDiffVerifier)
+        .policy(Policy::FullShellAutonomous)
+        .max_changed_files(1)
+        .max_inserted_lines(10)
+        .max_steps(1)
+        .try_build()
+        .expect("agent should build");
+
+    let report = agent
+        .solve(TaskSpec::from_text(PathBuf::from("."), "change code"))
+        .expect("simulation should return rejected attempt");
+
+    assert_eq!(report.status, SolveStatus::BudgetExhausted);
+    assert_eq!(reverted.get(), 1);
+    assert_eq!(report.attempts.len(), 1);
+    assert_eq!(
+        report.attempts[0].verification.status,
+        VerificationStatus::Rejected
+    );
+    assert!(report
+        .counterexamples
+        .iter()
+        .any(|counterexample| { counterexample.detail == "diff changed 2 files; limit is 1" }));
+    assert!(report
+        .counterexamples
+        .iter()
+        .any(|counterexample| { counterexample.detail == "diff inserted 11 lines; limit is 10" }));
 }
 
 #[test]

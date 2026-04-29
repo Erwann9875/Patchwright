@@ -28,6 +28,17 @@ impl Default for RustAdapter {
     }
 }
 
+impl RustAdapter {
+    pub fn new(fmt: bool, check: bool, test: bool, clippy: bool) -> Self {
+        Self {
+            fmt,
+            check,
+            test,
+            clippy,
+        }
+    }
+}
+
 impl LanguageAdapter for RustAdapter {
     fn detect(&self, repo: &RepoView) -> DetectionScore {
         if repo.root.join("Cargo.toml").is_file() {
@@ -111,12 +122,7 @@ mod tests {
 
     #[test]
     fn verifier_plan_includes_clippy_with_denied_warnings_when_enabled() {
-        let adapter = RustAdapter {
-            fmt: false,
-            check: false,
-            test: false,
-            clippy: true,
-        };
+        let adapter = RustAdapter::new(false, false, false, true);
         let task = TaskSpec::from_text(PathBuf::new(), "verify clippy");
         let repo = RepoView {
             root: PathBuf::new(),
@@ -132,12 +138,7 @@ mod tests {
 
     #[test]
     fn verifier_plan_uses_valid_cargo_fmt_check_shape() {
-        let adapter = RustAdapter {
-            fmt: true,
-            check: false,
-            test: false,
-            clippy: false,
-        };
+        let adapter = RustAdapter::new(true, false, false, false);
         let task = TaskSpec::from_text(PathBuf::new(), "verify fmt");
         let repo = RepoView {
             root: PathBuf::new(),

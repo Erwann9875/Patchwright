@@ -31,6 +31,8 @@ pub struct Agent {
     verifier: Box<dyn Verifier>,
     policy: Policy,
     max_steps: usize,
+    max_changed_files: usize,
+    max_inserted_lines: usize,
 }
 
 impl Agent {
@@ -199,6 +201,32 @@ impl Agent {
             );
         }
 
+        let changed_files = verification.diff_summary.changed_files.len();
+        if changed_files > self.max_changed_files {
+            reject_verification(
+                &mut verification,
+                "diff changed files",
+                &format!(
+                    "diff changed {changed_files} files; limit is {}",
+                    self.max_changed_files
+                ),
+                "diff",
+            );
+        }
+
+        let inserted_lines = verification.diff_summary.inserted_lines;
+        if inserted_lines > self.max_inserted_lines {
+            reject_verification(
+                &mut verification,
+                "diff inserted lines",
+                &format!(
+                    "diff inserted {inserted_lines} lines; limit is {}",
+                    self.max_inserted_lines
+                ),
+                "diff",
+            );
+        }
+
         verification
     }
 }
@@ -240,6 +268,8 @@ pub struct AgentBuilder {
     verifier: Option<Box<dyn Verifier>>,
     policy: Option<Policy>,
     max_steps: Option<usize>,
+    max_changed_files: Option<usize>,
+    max_inserted_lines: Option<usize>,
 }
 
 impl AgentBuilder {
@@ -278,6 +308,16 @@ impl AgentBuilder {
         self
     }
 
+    pub fn max_changed_files(mut self, max_changed_files: usize) -> Self {
+        self.max_changed_files = Some(max_changed_files);
+        self
+    }
+
+    pub fn max_inserted_lines(mut self, max_inserted_lines: usize) -> Self {
+        self.max_inserted_lines = Some(max_inserted_lines);
+        self
+    }
+
     pub fn build(self) -> Agent {
         match self.try_build() {
             Ok(agent) => agent,
@@ -286,6 +326,20 @@ impl AgentBuilder {
     }
 
     pub fn try_build(self) -> Result<Agent> {
+        let max_changed_files = self.max_changed_files.unwrap_or(5);
+        if max_changed_files == 0 {
+            return Err(PatchwrightError::InvalidInput(
+                "max_changed_files must be greater than 0".to_owned(),
+            ));
+        }
+
+        let max_inserted_lines = self.max_inserted_lines.unwrap_or(300);
+        if max_inserted_lines == 0 {
+            return Err(PatchwrightError::InvalidInput(
+                "max_inserted_lines must be greater than 0".to_owned(),
+            ));
+        }
+
         Ok(Agent {
             model: required(self.model, "model is required")?,
             execution: required(self.execution, "execution backend is required")?,
@@ -294,6 +348,8 @@ impl AgentBuilder {
             verifier: required(self.verifier, "verifier is required")?,
             policy: self.policy.unwrap_or(Policy::SafeStructuredOnly),
             max_steps: self.max_steps.unwrap_or(30),
+            max_changed_files,
+            max_inserted_lines,
         })
     }
 }

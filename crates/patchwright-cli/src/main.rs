@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use patchwright_config::{PatchwrightConfig, RustConfig};
 use patchwright_core::agent::{Agent, SolveStatus};
 use patchwright_core::policy::Policy;
 use patchwright_core::traits::{LanguageAdapter, Verifier};
@@ -46,7 +47,7 @@ where
             Ok(())
         }
         "config" if args.get(1).map(String::as_str) == Some("check") => {
-            println!("config: no config file required for this command");
+            println!("{}", run_config_check(&args)?);
             Ok(())
         }
         "bench" if args.get(1).map(String::as_str) == Some("startup") => run_startup_bench(),
@@ -57,13 +58,14 @@ where
 }
 
 fn run_solve(args: &[String]) -> Result<(), String> {
-    let options = SolveOptions::parse(args)?;
+    let options = solve_options(args)?;
 
-    let repo = accessible_repo_path(&options.repo)?;
-    let Some(model_name) = options.model else {
-        return Err("solve real mode requires --model <name> or --dry-run".to_owned());
+    let model_name = match options.model.clone() {
+        Some(model_name) => model_name,
+        None if options.dry_run => "dry-run".to_owned(),
+        None => return Err("solve real mode requires --model <name> or --dry-run".to_owned()),
     };
-    let sandbox = GitWorktreeSandbox::create(&repo).map_err(|error| error.to_string())?;
+    let sandbox = GitWorktreeSandbox::create(&options.repo).map_err(|error| error.to_string())?;
     let sandbox_repo = sandbox.root().to_path_buf();
     let config = OpenAiConfig {
         base_url: options.base_url,
@@ -77,11 +79,11 @@ fn run_solve(args: &[String]) -> Result<(), String> {
         OpenAiCompatibleClient::new(config)
     };
     let execution = LocalExecution::new(&sandbox_repo);
-    let language_adapter = RustAdapter::default();
+    let language_adapter = rust_adapter(&options.rust);
     let indexer = BasicIndexer::new(&sandbox_repo);
     let verifier = PlanVerifier;
     let policy = Policy::ProjectConfiguredCommands {
-        allowed_programs: vec!["cargo".to_owned()],
+        allowed_programs: options.allowed_programs,
     };
     let mut agent = Agent::builder()
         .model(model)
@@ -91,6 +93,8 @@ fn run_solve(args: &[String]) -> Result<(), String> {
         .verifier(verifier)
         .policy(policy)
         .max_steps(options.max_steps)
+        .max_changed_files(options.max_changed_files)
+        .max_inserted_lines(options.max_inserted_lines)
         .try_build()
         .map_err(|error| error.to_string())?;
 
@@ -110,7 +114,7 @@ fn run_solve(args: &[String]) -> Result<(), String> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SolveOptions {
-    repo: String,
+    repo: PathBuf,
     task: String,
     dry_run: bool,
     model: Option<String>,
@@ -118,9 +122,50 @@ struct SolveOptions {
     api_key_env: String,
     max_steps: usize,
     require_patch: bool,
+    max_changed_files: usize,
+    max_inserted_lines: usize,
+    allowed_programs: Vec<String>,
+    rust: RustConfig,
 }
 
-impl SolveOptions {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SolveFlags {
+    repo: String,
+    task: String,
+    dry_run: bool,
+    model: Option<String>,
+    base_url: Option<String>,
+    api_key_env: Option<String>,
+    max_steps: Option<usize>,
+    info_only: bool,
+}
+
+fn solve_options(args: &[String]) -> Result<SolveOptions, String> {
+    let flags = SolveFlags::parse(args)?;
+    let repo = accessible_repo_path(&flags.repo)?;
+    let config = PatchwrightConfig::load(&repo).map_err(|error| error.to_string())?;
+
+    Ok(SolveOptions {
+        repo,
+        task: flags.task,
+        dry_run: flags.dry_run,
+        model: flags.model.or(config.model.model),
+        base_url: flags.base_url.unwrap_or(config.model.base_url),
+        api_key_env: flags.api_key_env.unwrap_or(config.model.api_key_env),
+        max_steps: flags.max_steps.unwrap_or(config.agent.max_steps),
+        require_patch: if flags.info_only {
+            false
+        } else {
+            config.agent.require_patch
+        },
+        max_changed_files: config.agent.max_changed_files,
+        max_inserted_lines: config.agent.max_inserted_lines,
+        allowed_programs: config.policy.allowed_programs,
+        rust: config.rust,
+    })
+}
+
+impl SolveFlags {
     fn parse(args: &[String]) -> Result<Self, String> {
         validate_solve_args(args)?;
 
@@ -139,22 +184,23 @@ impl SolveOptions {
                 .parse::<usize>()
                 .ok()
                 .filter(|value| *value > 0)
+                .map(Some)
                 .ok_or_else(|| "solve requires --max-steps to be a positive integer".to_owned())?,
             None if has_flag(args, "--max-steps") => {
                 return Err("solve requires --max-steps to be a positive integer".to_owned());
             }
-            None => 30,
+            None => None,
         };
 
         Ok(Self {
             repo,
             task,
             dry_run,
-            model: model.or_else(|| dry_run.then(|| "dry-run".to_owned())),
-            base_url: optional_value(args, "--base-url", "https://api.openai.com/v1")?,
-            api_key_env: optional_value(args, "--api-key-env", "OPENAI_API_KEY")?,
+            model,
+            base_url: optional_value_if_present(args, "--base-url")?,
+            api_key_env: optional_value_if_present(args, "--api-key-env")?,
             max_steps,
-            require_patch: !has_flag(args, "--info-only"),
+            info_only: has_flag(args, "--info-only"),
         })
     }
 }
@@ -207,15 +253,60 @@ fn is_solve_bool_flag(arg: &str) -> bool {
     matches!(arg, "--dry-run" | "--info-only")
 }
 
+fn run_config_check(args: &[String]) -> Result<String, String> {
+    let repo = config_check_repo(args)?;
+    let config = PatchwrightConfig::load(&repo).map_err(|error| error.to_string())?;
+
+    Ok(format!(
+        "config: ok\nmodel base_url: {}\nagent max_steps: {}\npolicy allowed_programs: {}",
+        config.model.base_url,
+        config.agent.max_steps,
+        config.policy.allowed_programs.join(",")
+    ))
+}
+
+fn config_check_repo(args: &[String]) -> Result<PathBuf, String> {
+    let mut index = 2;
+    let mut repo = None;
+
+    while index < args.len() {
+        let arg = &args[index];
+        match arg.as_str() {
+            "--repo" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("config check requires --repo <path>".to_owned());
+                };
+                if value.starts_with("--") {
+                    return Err("config check requires --repo <path>".to_owned());
+                }
+                repo = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with("--") => {
+                return Err(format!("unknown config check flag: {value}"));
+            }
+            value => {
+                return Err(format!("unexpected config check argument: {value}"));
+            }
+        }
+    }
+
+    match repo {
+        Some(repo) => accessible_repo_path(&repo),
+        None => env::current_dir().map_err(|error| error.to_string()),
+    }
+}
+
 fn run_verify(args: &[String]) -> Result<(), String> {
     let Some(repo) = value_after(args, "--repo") else {
         return Err("verify requires --repo <path>".to_owned());
     };
 
     let repo = accessible_repo_path(&repo)?;
+    let config = PatchwrightConfig::load(&repo).map_err(|error| error.to_string())?;
     let sandbox = GitWorktreeSandbox::create(&repo).map_err(|error| error.to_string())?;
     let sandbox_repo = sandbox.root().to_path_buf();
-    let adapter = RustAdapter::default();
+    let adapter = rust_adapter(&config.rust);
     let repo_view = RepoView {
         root: sandbox_repo.clone(),
     };
@@ -233,7 +324,7 @@ fn run_verify(args: &[String]) -> Result<(), String> {
     let mut execution = LocalExecution::new(&sandbox_repo);
     let mut verifier = PlanVerifier;
     let policy = Policy::ProjectConfiguredCommands {
-        allowed_programs: vec!["cargo".to_owned()],
+        allowed_programs: config.policy.allowed_programs,
     };
     let report = verifier
         .verify(&mut execution, &plan, &policy)
@@ -286,6 +377,10 @@ fn startup_average_micros(total_nanos: u128, iterations: u128) -> u128 {
     total_nanos / iterations / 1_000
 }
 
+fn rust_adapter(config: &RustConfig) -> RustAdapter {
+    RustAdapter::new(config.fmt, config.check, config.test, config.clippy)
+}
+
 fn value_after(args: &[String], flag: &str) -> Option<String> {
     args.windows(2)
         .find(|window| window[0] == flag)
@@ -293,14 +388,6 @@ fn value_after(args: &[String], flag: &str) -> Option<String> {
             let value = &window[1];
             (!value.starts_with('-')).then(|| value.clone())
         })
-}
-
-fn optional_value(args: &[String], flag: &str, default: &str) -> Result<String, String> {
-    match value_after(args, flag) {
-        Some(value) => Ok(value),
-        None if has_flag(args, flag) => Err(format!("solve requires {flag} <value>")),
-        None => Ok(default.to_owned()),
-    }
 }
 
 fn optional_value_if_present(args: &[String], flag: &str) -> Result<Option<String>, String> {
@@ -316,19 +403,28 @@ fn has_flag(args: &[String], flag: &str) -> bool {
 }
 
 fn accessible_repo_path(path: &str) -> Result<PathBuf, String> {
-    fs::canonicalize(path).map_err(|_| format!("repo path is not accessible: {path}"))
+    let repo =
+        fs::canonicalize(path).map_err(|_| format!("repo path is not accessible: {path}"))?;
+    if !repo.is_dir() {
+        return Err(format!("repo path is not a directory: {path}"));
+    }
+    Ok(repo)
 }
 
 fn print_help() {
     println!(
-        "patchwright\n\nUSAGE:\n    patchwright --version\n    patchwright status\n    patchwright config check\n    patchwright bench startup\n    patchwright solve --repo <path> --task <text> [--dry-run] [--model <name>] [--base-url <url>] [--api-key-env <name>] [--max-steps <n>] [--info-only]\n    patchwright verify --repo <path>"
+        "patchwright\n\nUSAGE:\n    patchwright --version\n    patchwright status\n    patchwright config check [--repo <path>]\n    patchwright bench startup\n    patchwright solve --repo <path> --task <text> [--dry-run] [--model <name>] [--base-url <url>] [--api-key-env <name>] [--max-steps <n>] [--info-only]\n    patchwright verify --repo <path>"
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::run;
+    use patchwright_config::RustConfig;
+    use patchwright_core::traits::LanguageAdapter;
+    use patchwright_core::types::{RepoView, TaskSpec};
     use patchwright_test_support::TempRepo;
+    use std::path::PathBuf;
 
     #[test]
     fn version_route_returns_before_heavy_commands() {
@@ -355,6 +451,50 @@ mod tests {
     fn verify_requires_repo() {
         let result = run(["verify".to_owned()]);
         assert_eq!(result, Err("verify requires --repo <path>".to_owned()));
+    }
+
+    #[test]
+    fn config_check_default_succeeds() {
+        let result = run(["config".to_owned(), "check".to_owned()]);
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn config_check_reads_repo_patchwright_toml() {
+        let repo = TempRepo::new("cli-config-check-reads-config");
+        repo.write(
+            "patchwright.toml",
+            "[model]\nbase_url = \"http://127.0.0.1:8080/v1\"\n[agent]\nmax_steps = 9\n[policy]\nallowed_programs = [\"cargo\", \"rustc\"]\n",
+        );
+
+        let output = super::run_config_check(&[
+            "config".to_owned(),
+            "check".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+
+        assert!(output.contains("config: ok"));
+        assert!(output.contains("model base_url: http://127.0.0.1:8080/v1"));
+        assert!(output.contains("agent max_steps: 9"));
+        assert!(output.contains("policy allowed_programs: cargo,rustc"));
+    }
+
+    #[test]
+    fn config_check_rejects_file_repo_path() {
+        let repo = TempRepo::new("cli-config-check-rejects-file-repo-path");
+        repo.write("config-target.txt", "not a directory\n");
+        let file = repo.root().join("config-target.txt");
+
+        let result = run([
+            "config".to_owned(),
+            "check".to_owned(),
+            "--repo".to_owned(),
+            file.to_string_lossy().into_owned(),
+        ]);
+
+        assert!(matches!(result, Err(message) if message.contains("repo path is not a directory")));
     }
 
     #[test]
@@ -424,6 +564,105 @@ mod tests {
         ]);
 
         assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn solve_dry_run_uses_config_model_and_agent_defaults() {
+        let repo = TempRepo::new("cli-solve-dry-run-config");
+        repo.write(
+            "Cargo.toml",
+            "[package]\nname = \"cli_solve_dry_run_config\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        repo.write("src/lib.rs", "pub fn ok() {}\n");
+        repo.write(
+            "patchwright.toml",
+            "[model]\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"configured-dry-run\"\n[agent]\nmax_steps = 1\nrequire_patch = false\nmax_changed_files = 2\nmax_inserted_lines = 50\n",
+        );
+        repo.commit_all("seed valid rust crate with config");
+
+        let options = super::solve_options(&[
+            "solve".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+            "--task".to_owned(),
+            "summarize".to_owned(),
+            "--dry-run".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.model, Some("configured-dry-run".to_owned()));
+        assert_eq!(options.base_url, "http://127.0.0.1:9/v1");
+        assert_eq!(options.max_steps, 1);
+        assert!(!options.require_patch);
+        assert_eq!(options.max_changed_files, 2);
+        assert_eq!(options.max_inserted_lines, 50);
+
+        let result = run([
+            "solve".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+            "--task".to_owned(),
+            "summarize".to_owned(),
+            "--dry-run".to_owned(),
+        ]);
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn solve_cli_flags_override_config_defaults() {
+        let repo = TempRepo::new("cli-solve-flags-override-config");
+        repo.write(
+            "patchwright.toml",
+            "[model]\nbase_url = \"http://configured.invalid/v1\"\nmodel = \"configured-model\"\napi_key_env = \"CONFIGURED_KEY\"\n[agent]\nmax_steps = 3\n[policy]\nallowed_programs = [\"cargo\", \"rustc\"]\n",
+        );
+
+        let options = super::solve_options(&[
+            "solve".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+            "--task".to_owned(),
+            "summarize".to_owned(),
+            "--dry-run".to_owned(),
+            "--model".to_owned(),
+            "flag-model".to_owned(),
+            "--base-url".to_owned(),
+            "http://flag.invalid/v1".to_owned(),
+            "--api-key-env".to_owned(),
+            "FLAG_KEY".to_owned(),
+            "--max-steps".to_owned(),
+            "8".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.model, Some("flag-model".to_owned()));
+        assert_eq!(options.base_url, "http://flag.invalid/v1");
+        assert_eq!(options.api_key_env, "FLAG_KEY");
+        assert_eq!(options.max_steps, 8);
+        assert_eq!(options.allowed_programs, vec!["cargo", "rustc"]);
+    }
+
+    #[test]
+    fn rust_config_controls_verifier_plan_commands() {
+        let adapter = super::rust_adapter(&RustConfig {
+            fmt: false,
+            check: true,
+            test: false,
+            clippy: true,
+        });
+
+        let task = TaskSpec::from_text(PathBuf::new(), "verify rust config");
+        let repo = RepoView {
+            root: PathBuf::new(),
+        };
+        let plan = adapter.verifier_plan(&task, &repo);
+        let commands = plan
+            .commands
+            .iter()
+            .map(|command| format!("{} {}", command.program, command.args.join(" ")))
+            .collect::<Vec<_>>();
+
+        assert_eq!(commands, vec!["cargo check", "cargo clippy -- -D warnings"]);
     }
 
     #[test]
@@ -580,6 +819,29 @@ mod tests {
         );
         repo.write("src/lib.rs", "pub fn broken( {\n");
         repo.commit_all("seed invalid rust crate");
+
+        let result = run([
+            "verify".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+        ]);
+
+        assert!(matches!(result, Err(message) if message.contains("verification rejected")));
+    }
+
+    #[test]
+    fn verify_respects_configured_allowed_programs() {
+        let repo = TempRepo::new("cli-verify-denies-cargo");
+        repo.write(
+            "Cargo.toml",
+            "[package]\nname = \"cli_verify_denies_cargo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        repo.write("src/lib.rs", "pub fn ok() {}\n");
+        repo.write(
+            "patchwright.toml",
+            "[policy]\nallowed_programs = [\"git\"]\n",
+        );
+        repo.commit_all("seed valid rust crate with restrictive config");
 
         let result = run([
             "verify".to_owned(),
