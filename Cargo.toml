@@ -8,6 +8,8 @@ members = [
     "crates/patchwright-index",
     "crates/patchwright-lang-rust",
     "crates/patchwright-verify",
+    "crates/patchwright-model-codex-cli",
+    "crates/patchwright-model-contract",
     "crates/patchwright-model-openai",
 ]
 resolver = "2"
