@@ -22,5 +22,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "patchwright-index"
+version = "0.1.0"
+dependencies = [
+ "patchwright-core",
+ "patchwright-test-support",
+]
+
+[[package]]
 name = "patchwright-test-support"
 version = "0.1.0"
