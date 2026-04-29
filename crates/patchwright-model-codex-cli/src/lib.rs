@@ -3,11 +3,14 @@
 use patchwright_core::error::{PatchwrightError, Result};
 use patchwright_core::traits::ModelProvider;
 use patchwright_core::types::{ModelRequest, ModelResponse};
+use serde_json::{json, Value};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -15,6 +18,7 @@ static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 pub struct CodexCliConfig {
     pub command: String,
     pub model: Option<String>,
+    pub timeout_seconds: u64,
 }
 
 impl Default for CodexCliConfig {
@@ -22,6 +26,7 @@ impl Default for CodexCliConfig {
         Self {
             command: "codex".to_owned(),
             model: None,
+            timeout_seconds: 120,
         }
     }
 }
@@ -38,6 +43,79 @@ impl CodexCliClient {
 
     pub fn config(&self) -> &CodexCliConfig {
         &self.config
+    }
+
+    pub fn login(&self) -> Result<()> {
+        let status = run_codex_login(&self.config.command)?;
+        if !status.success() {
+            return Err(PatchwrightError::Model(format!(
+                "codex login failed with status {:?}",
+                status.code()
+            )));
+        }
+
+        Ok(())
+    }
+
+    pub fn check_auth(&self) -> Result<()> {
+        let work_dir = TempActionDir::create()?;
+        let schema_path = work_dir.path().join("auth.schema.json");
+        let action_path = work_dir.path().join("auth.json");
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status"],
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["ok"]
+                }
+            }
+        });
+        fs::write(
+            &schema_path,
+            serde_json::to_vec_pretty(&schema).map_err(|error| {
+                PatchwrightError::Model(format!("failed to serialize auth schema: {error}"))
+            })?,
+        )?;
+
+        let output = run_codex_exec(
+            &self.config,
+            work_dir.path(),
+            &schema_path,
+            &action_path,
+            "Return {\"status\":\"ok\"} if structured output is available.",
+        )?;
+        if output.timed_out {
+            return Err(PatchwrightError::Model(
+                output.timeout_error("codex auth check"),
+            ));
+        }
+        if !output.success() {
+            return Err(PatchwrightError::Model(format!(
+                "codex auth check failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+                output.status_code(),
+                output.stdout,
+                output.stderr
+            )));
+        }
+
+        let content = fs::read_to_string(&action_path).map_err(|error| {
+            PatchwrightError::Model(format!(
+                "codex auth check did not write structured output {}: {error}",
+                action_path.display()
+            ))
+        })?;
+        let value: Value = serde_json::from_str(&content).map_err(|error| {
+            PatchwrightError::Model(format!("codex auth check output was not JSON: {error}"))
+        })?;
+        if value.get("status").and_then(Value::as_str) != Some("ok") {
+            return Err(PatchwrightError::Model(
+                "codex auth check output did not contain status=ok".to_owned(),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -57,12 +135,15 @@ impl ModelProvider for CodexCliClient {
             &action_path,
             &prompt,
         )?;
-        if !output.status.success() {
+        if output.timed_out {
+            return Err(PatchwrightError::Model(output.timeout_error("codex exec")));
+        }
+        if !output.success() {
             return Err(PatchwrightError::Model(format!(
                 "codex exec failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+                output.status_code(),
+                output.stdout,
+                output.stderr
             )));
         }
 
@@ -84,15 +165,107 @@ fn run_codex_exec(
     schema_path: &Path,
     action_path: &Path,
     prompt: &str,
-) -> Result<std::process::Output> {
-    let mut command = Command::new(&config.command);
+) -> Result<CodexExecOutput> {
+    let mut child = spawn_codex_exec(config, cwd, schema_path, action_path)?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| PatchwrightError::Model("failed to open codex stdin pipe".to_owned()))?;
+    stdin
+        .write_all(prompt.as_bytes())
+        .map_err(PatchwrightError::from)?;
+    drop(stdin);
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| PatchwrightError::Model("failed to open codex stdout pipe".to_owned()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| PatchwrightError::Model("failed to open codex stderr pipe".to_owned()))?;
+    let stdout_handle = read_pipe(stdout);
+    let stderr_handle = read_pipe(stderr);
+
+    let deadline = Instant::now() + Duration::from_secs(config.timeout_seconds);
+    loop {
+        if let Some(status) = child.try_wait().map_err(PatchwrightError::from)? {
+            return Ok(CodexExecOutput {
+                status: Some(status),
+                stdout: join_reader(stdout_handle)?,
+                stderr: join_reader(stderr_handle)?,
+                timed_out: false,
+            });
+        }
+
+        if Instant::now() >= deadline {
+            kill_child_tree(&mut child);
+            let status = child.wait().ok();
+            return Ok(CodexExecOutput {
+                status,
+                stdout: join_reader(stdout_handle)?,
+                stderr: join_reader(stderr_handle)?,
+                timed_out: true,
+            });
+        }
+
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn spawn_codex_exec(
+    config: &CodexCliConfig,
+    cwd: &Path,
+    schema_path: &Path,
+    action_path: &Path,
+) -> Result<std::process::Child> {
+    let mut last_error = None;
+
+    for command_name in command_candidates(&config.command) {
+        let mut command = Command::new(&command_name);
+        configure_codex_exec_command(config, &mut command, schema_path, action_path);
+
+        match command
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => return Ok(child),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                last_error = Some(error);
+            }
+            Err(error) => {
+                return Err(PatchwrightError::Model(format!(
+                    "failed to start codex command '{}': {error}",
+                    command_name
+                )));
+            }
+        }
+    }
+
+    Err(PatchwrightError::Model(format!(
+        "failed to start codex command '{}': {}",
+        config.command,
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "program not found".to_owned())
+    )))
+}
+
+fn configure_codex_exec_command(
+    config: &CodexCliConfig,
+    command: &mut Command,
+    schema_path: &Path,
+    action_path: &Path,
+) {
     command
         .arg("exec")
         .arg("--ephemeral")
         .arg("--sandbox")
         .arg("read-only")
-        .arg("--ask-for-approval")
-        .arg("never")
         .arg("--skip-git-repo-check")
         .arg("--output-schema")
         .arg(schema_path)
@@ -105,30 +278,129 @@ fn run_codex_exec(
     }
 
     command.arg("-");
+    prepare_command(command);
+}
 
-    let mut child = command
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            PatchwrightError::Model(format!(
-                "failed to start codex command '{}': {error}",
-                config.command
-            ))
-        })?;
+fn run_codex_login(command: &str) -> Result<ExitStatus> {
+    let mut last_error = None;
 
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| PatchwrightError::Model("failed to open codex stdin pipe".to_owned()))?;
-    stdin
-        .write_all(prompt.as_bytes())
-        .map_err(PatchwrightError::from)?;
-    drop(stdin);
+    for command_name in command_candidates(command) {
+        match Command::new(&command_name).arg("login").status() {
+            Ok(status) => return Ok(status),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                last_error = Some(error);
+            }
+            Err(error) => {
+                return Err(PatchwrightError::Model(format!(
+                    "failed to start codex command '{}': {error}",
+                    command_name
+                )));
+            }
+        }
+    }
 
-    child.wait_with_output().map_err(PatchwrightError::from)
+    Err(PatchwrightError::Model(format!(
+        "failed to start codex command '{}': {}",
+        command,
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "program not found".to_owned())
+    )))
+}
+
+fn command_candidates(command: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let mut candidates = vec![command.to_owned()];
+        if Path::new(command).extension().is_none() {
+            candidates.push(format!("{command}.cmd"));
+        }
+        candidates
+    }
+
+    #[cfg(not(windows))]
+    {
+        vec![command.to_owned()]
+    }
+}
+
+#[cfg(unix)]
+fn prepare_command(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn prepare_command(_command: &mut Command) {}
+
+#[cfg(windows)]
+fn kill_child_tree(child: &mut std::process::Child) {
+    let pid = child.id().to_string();
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid, "/T", "/F"])
+        .output();
+    let _ = child.kill();
+}
+
+#[cfg(unix)]
+fn kill_child_tree(child: &mut std::process::Child) {
+    let group = format!("-{}", child.id());
+    let _ = Command::new("kill").args(["-TERM", "--", &group]).output();
+    thread::sleep(Duration::from_millis(50));
+    if matches!(child.try_wait(), Ok(None)) {
+        let _ = Command::new("kill").args(["-KILL", "--", &group]).output();
+    }
+    let _ = child.kill();
+}
+
+#[cfg(all(not(windows), not(unix)))]
+fn kill_child_tree(child: &mut std::process::Child) {
+    let _ = child.kill();
+}
+
+#[derive(Debug)]
+struct CodexExecOutput {
+    status: Option<ExitStatus>,
+    stdout: String,
+    stderr: String,
+    timed_out: bool,
+}
+
+impl CodexExecOutput {
+    fn success(&self) -> bool {
+        self.status.is_some_and(|status| status.success())
+    }
+
+    fn status_code(&self) -> Option<i32> {
+        self.status.and_then(|status| status.code())
+    }
+
+    fn timeout_error(&self, label: &str) -> String {
+        format!(
+            "{label} timed out\nstdout:\n{}\nstderr:\n{}",
+            self.stdout, self.stderr
+        )
+    }
+}
+
+fn read_pipe(
+    mut pipe: impl Read + Send + 'static,
+) -> JoinHandle<std::result::Result<Vec<u8>, String>> {
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        pipe.read_to_end(&mut output)
+            .map_err(|error| error.to_string())?;
+        Ok(output)
+    })
+}
+
+fn join_reader(handle: JoinHandle<std::result::Result<Vec<u8>, String>>) -> Result<String> {
+    let output = handle
+        .join()
+        .map_err(|_| PatchwrightError::Model("codex output reader thread panicked".to_owned()))?
+        .map_err(PatchwrightError::Io)?;
+
+    Ok(String::from_utf8_lossy(&output).into_owned())
 }
 
 struct TempActionDir {

@@ -25,6 +25,7 @@ fn codex_cli_provider_uses_schema_output_and_read_only_exec() {
     let mut client = CodexCliClient::new(CodexCliConfig {
         command: script.to_string_lossy().into_owned(),
         model: Some("test-codex-model".to_owned()),
+        timeout_seconds: 5,
     });
 
     let response = client
@@ -42,7 +43,7 @@ fn codex_cli_provider_uses_schema_output_and_read_only_exec() {
     assert!(args.contains("exec"));
     assert!(args.contains("--ephemeral"));
     assert!(args.contains("--sandbox read-only"));
-    assert!(args.contains("--ask-for-approval never"));
+    assert!(!args.contains("--ask-for-approval"));
     assert!(args.contains("--skip-git-repo-check"));
     assert!(args.contains("--output-schema"));
     assert!(args.contains("--json"));
@@ -53,6 +54,76 @@ fn codex_cli_provider_uses_schema_output_and_read_only_exec() {
     assert!(stdin.contains("Do not edit files"));
     assert!(stdin.contains("Return one final JSON object"));
     assert!(stdin.contains("summarize the parser"));
+}
+
+#[test]
+fn codex_cli_provider_kills_hung_process_after_timeout() {
+    let repo = TempRepo::new("codex-cli-timeout");
+    let script = sleeping_codex_script(repo.root());
+
+    let mut client = CodexCliClient::new(CodexCliConfig {
+        command: script.to_string_lossy().into_owned(),
+        model: None,
+        timeout_seconds: 1,
+    });
+
+    let started = std::time::Instant::now();
+    let error = client
+        .propose_action(request("summarize slowly"))
+        .expect_err("hung fake codex should time out");
+
+    assert!(error.to_string().contains("timed out"));
+    assert!(error.to_string().contains("codex exec"));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "timeout should kill the fake Codex process quickly; elapsed {:?}",
+        started.elapsed()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn codex_cli_provider_resolves_cmd_shim_without_extension_on_windows() {
+    let repo = TempRepo::new("codex-cli-cmd-shim");
+    let _script = fake_codex_script(repo.root());
+    let command_without_extension = repo.root().join("fake-codex");
+
+    let mut client = CodexCliClient::new(CodexCliConfig {
+        command: command_without_extension.to_string_lossy().into_owned(),
+        model: None,
+        timeout_seconds: 5,
+    });
+
+    let response = client
+        .propose_action(request("summarize through cmd shim"))
+        .expect("fake codex.cmd shim should be resolved");
+
+    assert_eq!(
+        response.action,
+        Action::Finish {
+            summary: "from fake codex".to_owned()
+        }
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn codex_cli_login_resolves_cmd_shim_without_extension_on_windows() {
+    let repo = TempRepo::new("codex-cli-login-cmd-shim");
+    let _script = fake_login_codex_script(repo.root());
+    let command_without_extension = repo.root().join("login-codex");
+
+    let client = CodexCliClient::new(CodexCliConfig {
+        command: command_without_extension.to_string_lossy().into_owned(),
+        model: None,
+        timeout_seconds: 5,
+    });
+
+    client.login().expect("fake codex.cmd login should run");
+
+    let args = fs::read_to_string(repo.root().join("login-args.txt"))
+        .expect("fake login codex args should be recorded");
+    assert!(args.contains("login"));
 }
 
 #[cfg(windows)]
@@ -80,6 +151,37 @@ exit /b 0
         ),
     )
     .expect("fake codex script should be written");
+    script
+}
+
+#[cfg(windows)]
+fn fake_login_codex_script(root: &Path) -> PathBuf {
+    let script = root.join("login-codex.cmd");
+    fs::write(
+        &script,
+        format!(
+            r#"@echo off
+echo %*>"{}"
+exit /b 0
+"#,
+            root.join("login-args.txt").display()
+        ),
+    )
+    .expect("fake login codex script should be written");
+    script
+}
+
+#[cfg(windows)]
+fn sleeping_codex_script(root: &Path) -> PathBuf {
+    let script = root.join("sleeping-codex.cmd");
+    fs::write(
+        &script,
+        r#"@echo off
+powershell -NoProfile -Command "Start-Sleep -Seconds 5"
+exit /b 0
+"#,
+    )
+    .expect("sleeping codex script should be written");
     script
 }
 
@@ -114,5 +216,25 @@ printf '%s\n' '{{"action":"finish","summary":"from fake codex"}}' > "$output"
         .permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&script, permissions).expect("fake codex should be executable");
+    script
+}
+
+#[cfg(not(windows))]
+fn sleeping_codex_script(root: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let script = root.join("sleeping-codex");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+sleep 5
+"#,
+    )
+    .expect("sleeping codex script should be written");
+    let mut permissions = fs::metadata(&script)
+        .expect("sleeping codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).expect("sleeping codex should be executable");
     script
 }

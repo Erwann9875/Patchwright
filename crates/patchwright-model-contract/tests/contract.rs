@@ -128,6 +128,8 @@ fn prompt_caps_large_user_state() {
 fn schema_contains_supported_actions_without_revert() {
     let schema = action_output_schema().to_string();
 
+    assert_eq!(action_output_schema()["type"], "object");
+    assert!(action_output_schema().get("oneOf").is_none());
     for action in [
         "read_file",
         "search_text",
@@ -155,6 +157,13 @@ fn parses_supported_action_json() {
             },
         ),
         (
+            r#"{"action":"read_file","path":"src/lib.rs","start":null,"end":null,"pattern":null,"root":null,"unified_diff":null,"summary":null}"#,
+            Action::ReadFile {
+                path: RepoPath::new("src/lib.rs"),
+                range: None,
+            },
+        ),
+        (
             r#"{"action":"search_text","pattern":"parse_user","root":"src"}"#,
             Action::SearchText(SearchQuery {
                 pattern: "parse_user".to_owned(),
@@ -172,6 +181,12 @@ fn parses_supported_action_json() {
             Action::ApplyPatch(Patch {
                 unified_diff: "diff --git a/src/lib.rs b/src/lib.rs\n...".to_owned(),
             }),
+        ),
+        (
+            r#"{"action":"finish","path":null,"start":null,"end":null,"pattern":null,"root":null,"unified_diff":null,"summary":"all done"}"#,
+            Action::Finish {
+                summary: "all done".to_owned(),
+            },
         ),
         (r#"{"action":"run_verifier"}"#, Action::RunVerifier),
         (

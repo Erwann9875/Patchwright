@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 patchwright-core = { path = "../patchwright-core" }
 patchwright-model-contract = { path = "../patchwright-model-contract" }
+serde_json = "1"
 
 [dev-dependencies]
 patchwright-test-support = { path = "../patchwright-test-support" }
