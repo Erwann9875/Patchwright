@@ -3,8 +3,7 @@
 use patchwright_core::policy::Policy;
 use patchwright_core::traits::{ExecutionBackend, Verifier};
 use patchwright_core::types::{
-    CheckReport, Counterexample, DiffSummary, PolicyEvent, VerificationReport, VerificationStatus,
-    VerifierPlan,
+    CheckReport, Counterexample, PolicyEvent, VerificationReport, VerificationStatus, VerifierPlan,
 };
 use patchwright_core::Result;
 
@@ -21,6 +20,20 @@ impl Verifier for PlanVerifier {
         let mut checks = Vec::new();
         let mut counterexamples = Vec::new();
         let mut policy_events = Vec::new();
+
+        if plan.commands.is_empty() {
+            let summary = "no verifier commands configured".to_owned();
+            checks.push(CheckReport {
+                name: "verifier plan".to_owned(),
+                command: None,
+                passed: false,
+                summary: summary.clone(),
+            });
+            counterexamples.push(Counterexample {
+                source: "verifier".to_owned(),
+                detail: summary,
+            });
+        }
 
         for command in &plan.commands {
             let allowed = policy.allows(command);
@@ -68,6 +81,34 @@ impl Verifier for PlanVerifier {
             }
         }
 
+        let diff_summary = execution.diff_summary()?;
+        let forbidden_paths = diff_summary
+            .changed_files
+            .iter()
+            .filter(|path| !policy.allows_repo_path(path))
+            .map(|path| path.0.clone())
+            .collect::<Vec<_>>();
+        if !forbidden_paths.is_empty() {
+            let summary = format!("forbidden files modified: {}", forbidden_paths.join(", "));
+            checks.push(CheckReport {
+                name: "diff scope".to_owned(),
+                command: None,
+                passed: false,
+                summary: summary.clone(),
+            });
+            counterexamples.push(Counterexample {
+                source: "diff".to_owned(),
+                detail: summary,
+            });
+        } else if !diff_summary.changed_files.is_empty() {
+            checks.push(CheckReport {
+                name: "diff scope".to_owned(),
+                command: None,
+                passed: true,
+                summary: "diff scope accepted".to_owned(),
+            });
+        }
+
         let status = if checks.iter().all(|check| check.passed) {
             VerificationStatus::Accepted
         } else {
@@ -78,7 +119,7 @@ impl Verifier for PlanVerifier {
             status,
             checks,
             counterexamples,
-            diff_summary: DiffSummary::default(),
+            diff_summary,
             policy_events,
         })
     }

@@ -1974,7 +1974,7 @@ fn detects_cargo_projects_and_builds_verifier_plan() {
         &view,
     );
     let commands: Vec<String> = plan.commands.iter().map(|cmd| cmd.args.join(" ")).collect();
-    assert!(commands.contains(&"fmt --check".to_owned()));
+    assert!(commands.contains(&"fmt -- --check".to_owned()));
     assert!(commands.contains(&"check".to_owned()));
     assert!(commands.contains(&"test".to_owned()));
 }
@@ -2776,7 +2776,7 @@ Expected: CLI tests pass.
 
 Run: `cargo run -p patchwright-cli -- verify --repo .`
 
-Expected: if the current repo is not a Rust workspace yet, command prints `no supported language adapter detected` and exits non-zero. After Task 1's workspace exists, command prints Cargo commands.
+Expected: if the current repo is not a Rust workspace yet, command prints `no supported language adapter detected` and exits non-zero. After Task 1's workspace exists, command prints and runs Cargo commands.
 
 Run: `cargo run -p patchwright-cli -- solve --repo . --task "summarize"`
 

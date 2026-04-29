@@ -1,9 +1,9 @@
 use crate::error::Result;
 use crate::policy::Policy;
 use crate::types::{
-    CommandSpec, DetectionScore, FileQuery, FileSlice, LineRange, ModelRequest, ModelResponse,
-    Patch, PatchId, RepoPath, RepoView, RunReport, ScoredPath, SearchQuery, SearchResults,
-    SnapshotId, Symbol, TaskSpec, VerificationReport, VerifierPlan,
+    CommandSpec, DetectionScore, DiffSummary, FileQuery, FileSlice, LineRange, ModelRequest,
+    ModelResponse, Patch, PatchId, RepoPath, RepoView, RunReport, ScoredPath, SearchQuery,
+    SearchResults, SnapshotId, Symbol, TaskSpec, VerificationReport, VerifierPlan,
 };
 
 pub trait ModelProvider {
@@ -16,6 +16,7 @@ pub trait ExecutionBackend {
     fn search(&self, query: SearchQuery) -> Result<SearchResults>;
     fn apply_patch(&mut self, patch: Patch) -> Result<PatchId>;
     fn run(&mut self, command: CommandSpec, policy: &Policy) -> Result<RunReport>;
+    fn diff_summary(&self) -> Result<DiffSummary>;
     fn revert(&mut self, snapshot: SnapshotId) -> Result<()>;
 }
 

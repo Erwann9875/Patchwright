@@ -74,6 +74,10 @@ impl ExecutionBackend for FakeExecution {
         })
     }
 
+    fn diff_summary(&self) -> Result<DiffSummary> {
+        Ok(DiffSummary::default())
+    }
+
     fn revert(&mut self, _snapshot: SnapshotId) -> Result<()> {
         self.reverted.set(self.reverted.get() + 1);
         Ok(())
@@ -133,6 +137,29 @@ impl Verifier for AcceptingVerifier {
         _policy: &Policy,
     ) -> Result<VerificationReport> {
         Ok(VerificationReport::accepted())
+    }
+}
+
+struct ForbiddenDiffVerifier;
+
+impl Verifier for ForbiddenDiffVerifier {
+    fn verify(
+        &mut self,
+        _execution: &mut dyn ExecutionBackend,
+        _plan: &VerifierPlan,
+        _policy: &Policy,
+    ) -> Result<VerificationReport> {
+        Ok(VerificationReport {
+            status: VerificationStatus::Accepted,
+            checks: Vec::new(),
+            counterexamples: Vec::new(),
+            diff_summary: DiffSummary {
+                changed_files: vec![RepoPath::new(".env")],
+                inserted_lines: 1,
+                deleted_lines: 0,
+            },
+            policy_events: Vec::new(),
+        })
     }
 }
 
@@ -243,6 +270,49 @@ fn rejected_verification_reverts_and_stores_counterexamples() {
         report.observations.last(),
         Some(Observation::Finished(_))
     ));
+}
+
+#[test]
+fn accepted_verification_with_forbidden_diff_is_rejected_and_reverted() {
+    let reverted = Rc::new(Cell::new(0));
+    let model = ScriptedModel {
+        actions: vec![Action::ApplyPatch(Patch {
+            unified_diff: "diff --git a/.env b/.env\n".to_owned(),
+        })],
+    };
+
+    let mut agent = Agent::builder()
+        .model(model)
+        .execution(FakeExecution {
+            reverted: Rc::clone(&reverted),
+            fail_apply_patch: false,
+        })
+        .language_adapter(FakeLanguage)
+        .indexer(EmptyIndex)
+        .verifier(ForbiddenDiffVerifier)
+        .policy(Policy::FullShellAutonomous)
+        .max_steps(1)
+        .try_build()
+        .expect("agent should build");
+
+    let report = agent
+        .solve(TaskSpec::from_text(PathBuf::from("."), "change code"))
+        .expect("simulation should return rejected attempt");
+
+    assert_eq!(report.status, SolveStatus::BudgetExhausted);
+    assert_eq!(reverted.get(), 1);
+    assert_eq!(report.attempts.len(), 1);
+    assert_eq!(
+        report.attempts[0].verification.status,
+        VerificationStatus::Rejected
+    );
+    assert_eq!(
+        report.counterexamples,
+        vec![Counterexample {
+            source: "diff".to_owned(),
+            detail: "forbidden files modified: .env".to_owned(),
+        }]
+    );
 }
 
 #[test]

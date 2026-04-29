@@ -2,7 +2,10 @@ use crate::action::{Action, Observation};
 use crate::error::{PatchwrightError, Result};
 use crate::policy::Policy;
 use crate::traits::{ExecutionBackend, Indexer, LanguageAdapter, ModelProvider, Verifier};
-use crate::types::{Attempt, Counterexample, ModelRequest, RepoView, TaskSpec, VerificationStatus};
+use crate::types::{
+    Attempt, CheckReport, Counterexample, ModelRequest, RepoView, TaskSpec, VerificationReport,
+    VerificationStatus,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SolveStatus {
@@ -84,7 +87,7 @@ impl Agent {
                             .verifier
                             .verify(self.execution.as_mut(), &plan, &self.policy)
                         {
-                            Ok(verification) => verification,
+                            Ok(verification) => self.apply_acceptance_gate(verification),
                             Err(error) => {
                                 let _ = self.execution.revert(snapshot);
                                 return Err(error);
@@ -116,6 +119,7 @@ impl Agent {
                     let verification =
                         self.verifier
                             .verify(self.execution.as_mut(), &plan, &self.policy)?;
+                    let verification = self.apply_acceptance_gate(verification);
                     counterexamples.extend(verification.counterexamples.clone());
                     observations.push(Observation::VerificationCompleted(verification));
                 }
@@ -124,6 +128,7 @@ impl Agent {
                     let verification =
                         self.verifier
                             .verify(self.execution.as_mut(), &plan, &self.policy)?;
+                    let verification = self.apply_acceptance_gate(verification);
                     counterexamples.extend(verification.counterexamples.clone());
                     observations.push(Observation::VerificationCompleted(verification));
                 }
@@ -152,6 +157,68 @@ impl Agent {
             counterexamples,
         })
     }
+
+    fn apply_acceptance_gate(&self, mut verification: VerificationReport) -> VerificationReport {
+        let denied_policy_events = verification
+            .policy_events
+            .iter()
+            .filter(|event| !event.allowed)
+            .count();
+        if denied_policy_events > 0 {
+            reject_verification(
+                &mut verification,
+                "policy gate",
+                "denied commands were requested",
+                "policy",
+            );
+        }
+
+        let forbidden_paths = verification
+            .diff_summary
+            .changed_files
+            .iter()
+            .filter(|path| !self.policy.allows_repo_path(path))
+            .map(|path| path.0.clone())
+            .collect::<Vec<_>>();
+        if !forbidden_paths.is_empty() {
+            reject_verification(
+                &mut verification,
+                "diff scope",
+                &format!("forbidden files modified: {}", forbidden_paths.join(", ")),
+                "diff",
+            );
+        }
+
+        verification
+    }
+}
+
+fn reject_verification(
+    verification: &mut VerificationReport,
+    check_name: &str,
+    summary: &str,
+    source: &str,
+) {
+    if verification
+        .checks
+        .iter()
+        .any(|check| check.name == check_name && !check.passed && check.summary == summary)
+    {
+        verification.status = VerificationStatus::Rejected;
+        return;
+    }
+
+    verification.status = VerificationStatus::Rejected;
+    verification.checks.push(CheckReport {
+        name: check_name.to_owned(),
+        command: None,
+        passed: false,
+        summary: summary.to_owned(),
+    });
+    verification.counterexamples.push(Counterexample {
+        source: source.to_owned(),
+        detail: summary.to_owned(),
+    });
 }
 
 #[derive(Default)]

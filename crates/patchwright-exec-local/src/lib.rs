@@ -4,15 +4,97 @@ use patchwright_core::error::{PatchwrightError, Result};
 use patchwright_core::policy::Policy;
 use patchwright_core::traits::ExecutionBackend;
 use patchwright_core::types::{
-    CommandSpec, ExitStatus, FileSlice, LineRange, Patch, PatchId, RepoPath, RunReport,
-    SearchMatch, SearchQuery, SearchResults, SnapshotId,
+    CommandSpec, DiffSummary, ExitStatus, FileSlice, LineRange, Patch, PatchId, RepoPath,
+    RunReport, SearchMatch, SearchQuery, SearchResults, SnapshotId,
 };
+use std::collections::BTreeSet;
+use std::env;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::process;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+static SANDBOX_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug)]
+pub struct GitWorktreeSandbox {
+    source_root: PathBuf,
+    root: PathBuf,
+}
+
+impl GitWorktreeSandbox {
+    pub fn create(source_root: impl AsRef<Path>) -> Result<Self> {
+        let source_root = fs::canonicalize(source_root.as_ref()).map_err(PatchwrightError::from)?;
+        ensure_clean_source(&source_root)?;
+        let root = unique_sandbox_path();
+
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&source_root)
+            .args(["worktree", "add", "--detach", "--quiet"])
+            .arg(&root)
+            .arg("HEAD")
+            .output()
+            .map_err(PatchwrightError::from)?;
+
+        if !output.status.success() {
+            return Err(PatchwrightError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+
+        let root = fs::canonicalize(&root).map_err(PatchwrightError::from)?;
+        Ok(Self { source_root, root })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+fn ensure_clean_source(source_root: &Path) -> Result<()> {
+    let status = git_output(
+        source_root,
+        ["status", "--porcelain", "--untracked-files=all"],
+    )?;
+    if !status.trim().is_empty() {
+        return Err(PatchwrightError::InvalidInput(
+            "repo has uncommitted changes; commit or stash before sandboxed execution".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
+impl Drop for GitWorktreeSandbox {
+    fn drop(&mut self) {
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&self.source_root)
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.root)
+            .status();
+        if self.root.exists() {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+fn unique_sandbox_path() -> PathBuf {
+    let counter = SANDBOX_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    env::temp_dir().join(format!(
+        "patchwright-worktree-{}-{nanos}-{counter}",
+        process::id()
+    ))
+}
 
 #[derive(Debug, Clone)]
 pub struct LocalExecution {
@@ -231,6 +313,10 @@ impl ExecutionBackend for LocalExecution {
         })
     }
 
+    fn diff_summary(&self) -> Result<DiffSummary> {
+        diff_summary(&self.root)
+    }
+
     fn revert(&mut self, snapshot: SnapshotId) -> Result<()> {
         git_status(&self.root, ["reset", "--hard", &snapshot.0])?;
         git_status(&self.root, ["clean", "-fd"])?;
@@ -332,6 +418,77 @@ fn collect_matches(
 
 fn normalize_repo_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn diff_summary(root: &Path) -> Result<DiffSummary> {
+    let mut changed_files = BTreeSet::new();
+    let mut inserted_lines = 0usize;
+    let mut deleted_lines = 0usize;
+
+    let numstat = git_output(root, ["diff", "--numstat", "--"])?;
+    for line in numstat.lines() {
+        let mut columns = line.split('\t');
+        let Some(inserted) = columns.next() else {
+            continue;
+        };
+        let Some(deleted) = columns.next() else {
+            continue;
+        };
+        let Some(path) = columns.next() else {
+            continue;
+        };
+
+        if let Ok(count) = inserted.parse::<usize>() {
+            inserted_lines += count;
+        }
+        if let Ok(count) = deleted.parse::<usize>() {
+            deleted_lines += count;
+        }
+        changed_files.insert(normalize_git_status_path(path));
+    }
+
+    let status = git_output(root, ["status", "--porcelain", "--untracked-files=all"])?;
+    for line in status.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+
+        let status_code = &line[..2];
+        let path = line[3..].trim();
+        if path.is_empty() {
+            continue;
+        }
+
+        let normalized = normalize_git_status_path(path);
+        if status_code == "??" {
+            inserted_lines += count_text_lines(&root.join(&normalized))?;
+        }
+        changed_files.insert(normalized);
+    }
+
+    Ok(DiffSummary {
+        changed_files: changed_files.into_iter().map(RepoPath::new).collect(),
+        inserted_lines,
+        deleted_lines,
+    })
+}
+
+fn normalize_git_status_path(path: &str) -> String {
+    let path = path
+        .rsplit_once(" -> ")
+        .map(|(_, new_path)| new_path)
+        .unwrap_or(path);
+    path.trim_matches('"').replace('\\', "/")
+}
+
+fn count_text_lines(path: &Path) -> Result<usize> {
+    match fs::read_to_string(path) {
+        Ok(content) if content.is_empty() => Ok(0),
+        Ok(content) => Ok(content.lines().count()),
+        Err(error) if error.kind() == ErrorKind::InvalidData => Ok(0),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(PatchwrightError::from(error)),
+    }
 }
 
 fn git_output<const N: usize>(root: &Path, args: [&str; N]) -> Result<String> {

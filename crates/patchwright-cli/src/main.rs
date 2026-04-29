@@ -2,9 +2,9 @@
 
 use patchwright_core::agent::{Agent, SolveStatus};
 use patchwright_core::policy::Policy;
-use patchwright_core::traits::LanguageAdapter;
-use patchwright_core::types::{RepoView, TaskSpec};
-use patchwright_exec_local::LocalExecution;
+use patchwright_core::traits::{LanguageAdapter, Verifier};
+use patchwright_core::types::{RepoView, TaskSpec, VerificationStatus};
+use patchwright_exec_local::{GitWorktreeSandbox, LocalExecution};
 use patchwright_index::BasicIndexer;
 use patchwright_lang_rust::RustAdapter;
 use patchwright_model_openai::{OpenAiCompatibleClient, OpenAiConfig};
@@ -65,15 +65,17 @@ fn run_solve(args: &[String]) -> Result<(), String> {
     };
 
     let repo = accessible_repo_path(&repo)?;
+    let sandbox = GitWorktreeSandbox::create(&repo).map_err(|error| error.to_string())?;
+    let sandbox_repo = sandbox.root().to_path_buf();
     let model = OpenAiCompatibleClient::dry_run(OpenAiConfig {
         base_url: "http://127.0.0.1:9".to_owned(),
         model: "dry-run".to_owned(),
         api_key_env: "OPENAI_API_KEY".to_owned(),
         timeout_seconds: 30,
     });
-    let execution = LocalExecution::new(&repo);
+    let execution = LocalExecution::new(&sandbox_repo);
     let language_adapter = RustAdapter::default();
-    let indexer = BasicIndexer::new(&repo);
+    let indexer = BasicIndexer::new(&sandbox_repo);
     let verifier = PlanVerifier;
     let policy = Policy::ProjectConfiguredCommands {
         allowed_programs: vec!["cargo".to_owned()],
@@ -90,7 +92,7 @@ fn run_solve(args: &[String]) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
 
     let report = agent
-        .solve(TaskSpec::from_text(repo, task))
+        .solve(TaskSpec::from_text(sandbox_repo, task))
         .map_err(|error| error.to_string())?;
     println!("solve status: {:?}", report.status);
     if report.status != SolveStatus::Accepted {
@@ -106,18 +108,49 @@ fn run_verify(args: &[String]) -> Result<(), String> {
     };
 
     let repo = accessible_repo_path(&repo)?;
+    let sandbox = GitWorktreeSandbox::create(&repo).map_err(|error| error.to_string())?;
+    let sandbox_repo = sandbox.root().to_path_buf();
     let adapter = RustAdapter::default();
-    let repo_view = RepoView { root: repo.clone() };
+    let repo_view = RepoView {
+        root: sandbox_repo.clone(),
+    };
     if adapter.detect(&repo_view).0 == 0 {
         return Err("no supported language adapter detected".to_owned());
     }
 
-    let task = TaskSpec::from_text(repo, "verify");
+    let task = TaskSpec::from_text(sandbox_repo.clone(), "verify");
     let plan = adapter.verifier_plan(&task, &repo_view);
     println!("verification plan:");
-    for command in plan.commands {
+    for command in &plan.commands {
         println!("  {} {}", command.program, command.args.join(" "));
     }
+
+    let mut execution = LocalExecution::new(&sandbox_repo);
+    let mut verifier = PlanVerifier;
+    let policy = Policy::ProjectConfiguredCommands {
+        allowed_programs: vec!["cargo".to_owned()],
+    };
+    let report = verifier
+        .verify(&mut execution, &plan, &policy)
+        .map_err(|error| error.to_string())?;
+
+    for check in &report.checks {
+        let status = if check.passed { "ok" } else { "failed" };
+        println!("  [{status}] {}: {}", check.name, check.summary);
+    }
+
+    if report.status != VerificationStatus::Accepted {
+        return Err(format!(
+            "verification rejected: {}",
+            report
+                .counterexamples
+                .first()
+                .map(|counterexample| counterexample.detail.as_str())
+                .unwrap_or("no counterexample reported")
+        ));
+    }
+
+    println!("verification: accepted");
 
     Ok(())
 }
@@ -170,6 +203,7 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::run;
+    use patchwright_test_support::TempRepo;
 
     #[test]
     fn version_route_returns_before_heavy_commands() {
@@ -248,6 +282,25 @@ mod tests {
             result,
             Err("repo path is not accessible: missing-repo-for-cli-test".to_owned())
         );
+    }
+
+    #[test]
+    fn verify_runs_real_cargo_checks() {
+        let repo = TempRepo::new("cli-verify-runs-checks");
+        repo.write(
+            "Cargo.toml",
+            "[package]\nname = \"cli_verify_runs_checks\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        repo.write("src/lib.rs", "pub fn broken( {\n");
+        repo.commit_all("seed invalid rust crate");
+
+        let result = run([
+            "verify".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+        ]);
+
+        assert!(matches!(result, Err(message) if message.contains("verification rejected")));
     }
 
     #[test]

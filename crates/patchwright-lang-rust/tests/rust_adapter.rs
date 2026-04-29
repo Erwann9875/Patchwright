@@ -69,7 +69,7 @@ fn verifier_plan_includes_default_cargo_checks() {
     assert_eq!(
         commands,
         vec![
-            ("cargo", vec!["fmt", "--check"], 300),
+            ("cargo", vec!["fmt", "--", "--check"], 300),
             ("cargo", vec!["check"], 300),
             ("cargo", vec!["test"], 300),
         ]

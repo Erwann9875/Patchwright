@@ -17,5 +17,8 @@ patchwright-lang-rust = { path = "../patchwright-lang-rust" }
 patchwright-model-openai = { path = "../patchwright-model-openai" }
 patchwright-verify = { path = "../patchwright-verify" }
 
+[dev-dependencies]
+patchwright-test-support = { path = "../patchwright-test-support" }
+
 [lints]
 workspace = true

@@ -41,7 +41,7 @@ impl LanguageAdapter for RustAdapter {
         let mut commands = Vec::new();
 
         if self.fmt {
-            commands.push(cargo(["fmt", "--check"]));
+            commands.push(cargo(["fmt", "--", "--check"]));
         }
         if self.check {
             commands.push(cargo(["check"]));
@@ -128,5 +128,25 @@ mod tests {
         assert_eq!(command.program, "cargo");
         assert_eq!(command.args, ["clippy", "--", "-D", "warnings"]);
         assert_eq!(command.timeout.as_secs(), 300);
+    }
+
+    #[test]
+    fn verifier_plan_uses_valid_cargo_fmt_check_shape() {
+        let adapter = RustAdapter {
+            fmt: true,
+            check: false,
+            test: false,
+            clippy: false,
+        };
+        let task = TaskSpec::from_text(PathBuf::new(), "verify fmt");
+        let repo = RepoView {
+            root: PathBuf::new(),
+        };
+
+        let plan = adapter.verifier_plan(&task, &repo);
+
+        let command = &plan.commands[0];
+        assert_eq!(command.program, "cargo");
+        assert_eq!(command.args, ["fmt", "--", "--check"]);
     }
 }

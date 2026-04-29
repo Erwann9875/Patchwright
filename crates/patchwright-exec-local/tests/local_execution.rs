@@ -2,7 +2,7 @@ use patchwright_core::error::{PatchwrightError, Result};
 use patchwright_core::policy::Policy;
 use patchwright_core::traits::ExecutionBackend;
 use patchwright_core::types::{CommandSpec, LineRange, Patch, RepoPath, SearchMatch, SearchQuery};
-use patchwright_exec_local::LocalExecution;
+use patchwright_exec_local::{GitWorktreeSandbox, LocalExecution};
 use patchwright_test_support::TempRepo;
 use std::fs;
 use std::path::Path;
@@ -87,6 +87,107 @@ index aac65dc..6320cd2 100644
 
     let reverted_content = fs::read_to_string(repo.root().join("notes.txt"))?;
     assert_eq!(reverted_content.replace("\r\n", "\n"), "old\nkeep\n");
+
+    Ok(())
+}
+
+#[test]
+fn diff_summary_reports_modified_and_new_files() -> Result<()> {
+    let repo = TempRepo::new("exec-local-diff-summary");
+    repo.write("src/lib.rs", "old\nkeep\n");
+    repo.commit_all("seed");
+    let mut execution = LocalExecution::new(repo.root());
+
+    execution.apply_patch(Patch {
+        unified_diff: "\
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..1269488
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1 @@
++hello
+diff --git a/src/lib.rs b/src/lib.rs
+index aac65dc..6320cd2 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,2 +1,2 @@
+-old
++new
+ keep
+"
+        .to_owned(),
+    })?;
+
+    let summary = execution.diff_summary()?;
+
+    assert_eq!(
+        summary.changed_files,
+        vec![RepoPath::new("README.md"), RepoPath::new("src/lib.rs")]
+    );
+    assert_eq!(summary.inserted_lines, 2);
+    assert_eq!(summary.deleted_lines, 1);
+
+    Ok(())
+}
+
+#[test]
+fn sandbox_creation_rejects_dirty_source_without_removing_user_files() -> Result<()> {
+    let repo = TempRepo::new("exec-local-sandbox-rejects-dirty-source");
+    repo.write("notes.txt", "committed\n");
+    repo.commit_all("seed");
+    repo.write("notes.txt", "dirty source\n");
+    repo.write("scratch.txt", "untracked source\n");
+
+    let result = GitWorktreeSandbox::create(repo.root());
+
+    assert!(
+        matches!(result, Err(PatchwrightError::InvalidInput(message)) if message.contains("uncommitted changes"))
+    );
+    assert_eq!(
+        fs::read_to_string(repo.root().join("notes.txt"))?,
+        "dirty source\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.root().join("scratch.txt"))?,
+        "untracked source\n"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn sandboxed_worktree_revert_does_not_mutate_clean_source_repo() -> Result<()> {
+    let repo = TempRepo::new("exec-local-sandbox-preserves-clean-source");
+    repo.write("notes.txt", "committed\n");
+    repo.commit_all("seed");
+
+    {
+        let sandbox = GitWorktreeSandbox::create(repo.root())?;
+        assert_ne!(sandbox.root(), repo.root());
+
+        let mut execution = LocalExecution::new(sandbox.root());
+        let snapshot = execution.snapshot()?;
+        execution.apply_patch(Patch {
+            unified_diff: "\
+diff --git a/notes.txt b/notes.txt
+index 3f17798..8f7fc58 100644
+--- a/notes.txt
++++ b/notes.txt
+@@ -1 +1 @@
+-committed
++sandbox change
+"
+            .to_owned(),
+        })?;
+        execution.revert(snapshot)?;
+    }
+
+    assert_eq!(
+        fs::read_to_string(repo.root().join("notes.txt"))?,
+        "committed\n"
+    );
+    assert!(!repo.root().join("scratch.txt").exists());
 
     Ok(())
 }

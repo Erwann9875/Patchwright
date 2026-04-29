@@ -2,14 +2,14 @@ use patchwright_core::error::{PatchwrightError, Result};
 use patchwright_core::policy::Policy;
 use patchwright_core::traits::{ExecutionBackend, Verifier};
 use patchwright_core::types::{
-    CheckReport, CommandSpec, Counterexample, ExitStatus, FileSlice, LineRange, Patch, PatchId,
-    PolicyEvent, RepoPath, RunReport, SearchQuery, SearchResults, SnapshotId, VerificationStatus,
-    VerifierPlan,
+    CheckReport, CommandSpec, Counterexample, DiffSummary, ExitStatus, FileSlice, LineRange, Patch,
+    PatchId, PolicyEvent, RepoPath, RunReport, SearchQuery, SearchResults, SnapshotId,
+    VerificationStatus, VerifierPlan,
 };
 use patchwright_verify::PlanVerifier;
 
 #[test]
-fn empty_plan_accepts() -> Result<()> {
+fn empty_plan_rejects_without_running_commands() -> Result<()> {
     let mut execution = FakeExecutionBackend::default();
     let mut verifier = PlanVerifier;
     let plan = VerifierPlan {
@@ -18,9 +18,23 @@ fn empty_plan_accepts() -> Result<()> {
 
     let report = verifier.verify(&mut execution, &plan, &Policy::FullShellAutonomous)?;
 
-    assert_eq!(report.status, VerificationStatus::Accepted);
-    assert!(report.checks.is_empty());
-    assert!(report.counterexamples.is_empty());
+    assert_eq!(report.status, VerificationStatus::Rejected);
+    assert_eq!(
+        report.checks,
+        vec![CheckReport {
+            name: "verifier plan".to_owned(),
+            command: None,
+            passed: false,
+            summary: "no verifier commands configured".to_owned(),
+        }]
+    );
+    assert_eq!(
+        report.counterexamples,
+        vec![Counterexample {
+            source: "verifier".to_owned(),
+            detail: "no verifier commands configured".to_owned(),
+        }]
+    );
     assert!(report.policy_events.is_empty());
     assert!(execution.ran_commands.is_empty());
 
@@ -29,7 +43,14 @@ fn empty_plan_accepts() -> Result<()> {
 
 #[test]
 fn all_pass_plan_accepts_without_counterexamples() -> Result<()> {
-    let mut execution = FakeExecutionBackend::default();
+    let mut execution = FakeExecutionBackend {
+        diff_summary: DiffSummary {
+            changed_files: vec![RepoPath::new("src/lib.rs")],
+            inserted_lines: 3,
+            deleted_lines: 1,
+        },
+        ..FakeExecutionBackend::default()
+    };
     let mut verifier = PlanVerifier;
     let plan = VerifierPlan {
         commands: vec![
@@ -41,10 +62,54 @@ fn all_pass_plan_accepts_without_counterexamples() -> Result<()> {
     let report = verifier.verify(&mut execution, &plan, &Policy::FullShellAutonomous)?;
 
     assert_eq!(report.status, VerificationStatus::Accepted);
-    assert_eq!(report.checks.len(), 2);
+    assert_eq!(report.checks.len(), 3);
     assert!(report.checks.iter().all(|check| check.passed));
     assert!(report.counterexamples.is_empty());
+    assert_eq!(
+        report.diff_summary.changed_files,
+        vec![RepoPath::new("src/lib.rs")]
+    );
+    assert_eq!(report.diff_summary.inserted_lines, 3);
+    assert_eq!(report.diff_summary.deleted_lines, 1);
     assert_eq!(execution.ran_commands.len(), 2);
+
+    Ok(())
+}
+
+#[test]
+fn forbidden_diff_scope_rejects_otherwise_passing_plan() -> Result<()> {
+    let mut execution = FakeExecutionBackend {
+        diff_summary: DiffSummary {
+            changed_files: vec![RepoPath::new(".env")],
+            inserted_lines: 1,
+            deleted_lines: 0,
+        },
+        ..FakeExecutionBackend::default()
+    };
+    let mut verifier = PlanVerifier;
+    let plan = VerifierPlan {
+        commands: vec![CommandSpec::new("cargo", ["test"])],
+    };
+
+    let report = verifier.verify(&mut execution, &plan, &Policy::FullShellAutonomous)?;
+
+    assert_eq!(report.status, VerificationStatus::Rejected);
+    assert_eq!(
+        report.checks.last(),
+        Some(&CheckReport {
+            name: "diff scope".to_owned(),
+            command: None,
+            passed: false,
+            summary: "forbidden files modified: .env".to_owned(),
+        })
+    );
+    assert_eq!(
+        report.counterexamples.last(),
+        Some(&Counterexample {
+            source: "diff".to_owned(),
+            detail: "forbidden files modified: .env".to_owned(),
+        })
+    );
 
     Ok(())
 }
@@ -254,6 +319,7 @@ struct FakeExecutionBackend {
     failure_stdout: String,
     failure_stderr: String,
     fail_with_error: bool,
+    diff_summary: DiffSummary,
 }
 
 impl Default for FakeExecutionBackend {
@@ -263,6 +329,7 @@ impl Default for FakeExecutionBackend {
             failure_stdout: String::new(),
             failure_stderr: "command failed".to_owned(),
             fail_with_error: false,
+            diff_summary: DiffSummary::default(),
         }
     }
 }
@@ -317,6 +384,10 @@ impl ExecutionBackend for FakeExecutionBackend {
                 self.failure_stderr.clone()
             },
         })
+    }
+
+    fn diff_summary(&self) -> Result<DiffSummary> {
+        Ok(self.diff_summary.clone())
     }
 
     fn revert(&mut self, _snapshot: SnapshotId) -> Result<()> {
