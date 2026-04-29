@@ -345,10 +345,10 @@ fn kill_child_tree(child: &mut std::process::Child) {
 #[cfg(unix)]
 fn kill_child_tree(child: &mut std::process::Child) {
     let group = format!("-{}", child.id());
-    let _ = Command::new("kill").args(["-TERM", &group]).output();
+    let _ = Command::new("kill").args(["-TERM", "--", &group]).output();
     thread::sleep(Duration::from_millis(50));
     if matches!(child.try_wait(), Ok(None)) {
-        let _ = Command::new("kill").args(["-KILL", &group]).output();
+        let _ = Command::new("kill").args(["-KILL", "--", &group]).output();
     }
     let _ = child.kill();
 }
