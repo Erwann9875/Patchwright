@@ -43,7 +43,7 @@ fn codex_cli_provider_uses_schema_output_and_read_only_exec() {
     assert!(args.contains("exec"));
     assert!(args.contains("--ephemeral"));
     assert!(args.contains("--sandbox read-only"));
-    assert!(args.contains("--ask-for-approval never"));
+    assert!(!args.contains("--ask-for-approval"));
     assert!(args.contains("--skip-git-repo-check"));
     assert!(args.contains("--output-schema"));
     assert!(args.contains("--json"));

@@ -266,8 +266,6 @@ fn configure_codex_exec_command(
         .arg("--ephemeral")
         .arg("--sandbox")
         .arg("read-only")
-        .arg("--ask-for-approval")
-        .arg("never")
         .arg("--skip-git-repo-check")
         .arg("--output-schema")
         .arg(schema_path)
