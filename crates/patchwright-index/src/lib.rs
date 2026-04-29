@@ -33,6 +33,19 @@ pub struct ProjectProfile {
     pub ci_files: Vec<RepoPath>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ArchitectureMap {
+    pub manifests: Vec<RepoPath>,
+    pub source_roots: Vec<RepoPath>,
+    pub test_roots: Vec<RepoPath>,
+    pub route_files: Vec<RepoPath>,
+    pub model_files: Vec<RepoPath>,
+    pub service_files: Vec<RepoPath>,
+    pub config_files: Vec<RepoPath>,
+    pub migration_files: Vec<RepoPath>,
+    pub ci_files: Vec<RepoPath>,
+}
+
 impl BasicIndexer {
     pub fn new(root: impl AsRef<Path>) -> Self {
         let root = fs::canonicalize(root.as_ref())
@@ -78,6 +91,24 @@ pub fn profile_project(root: impl AsRef<Path>) -> Result<ProjectProfile> {
     detect_terraform_profile(&paths, &mut profile);
 
     Ok(profile)
+}
+
+pub fn architecture_map(root: impl AsRef<Path>) -> Result<ArchitectureMap> {
+    let profile = profile_project(root.as_ref())?;
+    let indexer = BasicIndexer::new(root);
+    let files = indexer.list_files(FileQuery::default())?;
+
+    Ok(ArchitectureMap {
+        manifests: profile.manifests,
+        source_roots: profile.source_roots,
+        test_roots: profile.test_roots,
+        route_files: files_matching(&files, is_route_file),
+        model_files: files_matching(&files, is_model_file),
+        service_files: files_matching(&files, is_service_file),
+        config_files: files_matching(&files, is_config_file),
+        migration_files: files_matching(&files, is_migration_file),
+        ci_files: profile.ci_files,
+    })
 }
 
 impl Indexer for BasicIndexer {
@@ -408,6 +439,64 @@ fn is_ci_file(path: &str) -> bool {
         || path.starts_with(".gitlab-ci")
         || path == "Jenkinsfile"
         || path.starts_with(".circleci/")
+}
+
+fn files_matching(files: &[ScoredPath], predicate: fn(&str) -> bool) -> Vec<RepoPath> {
+    files
+        .iter()
+        .filter(|file| predicate(&file.path.0))
+        .map(|file| file.path.clone())
+        .collect()
+}
+
+fn is_route_file(path: &str) -> bool {
+    path.contains("/routes/")
+        || path.contains("/controllers/")
+        || path.contains("/api/")
+        || path.ends_with("/route.ts")
+        || path.ends_with("/route.tsx")
+        || path.ends_with("/route.js")
+        || path.ends_with("/route.jsx")
+        || path.starts_with("routes/")
+        || path.starts_with("controllers/")
+        || path.starts_with("app/api/")
+        || path.starts_with("pages/api/")
+}
+
+fn is_model_file(path: &str) -> bool {
+    path.contains("/models/")
+        || path.starts_with("models/")
+        || path.ends_with("model.rs")
+        || path.ends_with("model.py")
+        || path.ends_with("schema.prisma")
+}
+
+fn is_service_file(path: &str) -> bool {
+    path.contains("/services/")
+        || path.starts_with("services/")
+        || path.contains("_service.")
+        || path.contains(".service.")
+}
+
+fn is_config_file(path: &str) -> bool {
+    path == "tsconfig.json"
+        || path == "pyproject.toml"
+        || path == "Cargo.toml"
+        || path == "package.json"
+        || path == "go.mod"
+        || path.ends_with(".config.js")
+        || path.ends_with(".config.ts")
+        || path.ends_with(".config.cjs")
+        || path.ends_with(".config.mjs")
+        || path.ends_with("/config.py")
+        || path.contains("/config/")
+}
+
+fn is_migration_file(path: &str) -> bool {
+    path.contains("/migrations/")
+        || path.starts_with("migrations/")
+        || path.contains("/db/migrate/")
+        || path.starts_with("db/migrate/")
 }
 
 fn has_path(paths: &[&str], expected: &str) -> bool {
