@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "crates/patchwright-cli",
+    "crates/patchwright-core",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Erwann9875/Patchwright"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
