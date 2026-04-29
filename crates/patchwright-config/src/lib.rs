@@ -47,6 +47,12 @@ impl PatchwrightConfig {
             ));
         }
 
+        if self.model.codex_cli.timeout_seconds == 0 {
+            return Err(PatchwrightError::InvalidInput(
+                "model.codex_cli.timeout_seconds must be greater than 0".to_owned(),
+            ));
+        }
+
         if self.model.openai.timeout_seconds == 0 {
             return Err(PatchwrightError::InvalidInput(
                 "model.openai.timeout_seconds must be greater than 0".to_owned(),
@@ -119,6 +125,7 @@ pub enum ModelProviderKind {
 pub struct CodexCliModelConfig {
     pub command: String,
     pub model: Option<String>,
+    pub timeout_seconds: u64,
 }
 
 impl Default for CodexCliModelConfig {
@@ -126,6 +133,7 @@ impl Default for CodexCliModelConfig {
         Self {
             command: "codex".to_owned(),
             model: None,
+            timeout_seconds: 120,
         }
     }
 }

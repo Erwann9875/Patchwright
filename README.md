@@ -22,11 +22,21 @@ Run basic commands:
 ```bash
 cargo run -p patchwright-cli -- --version
 cargo run -p patchwright-cli -- status
+cargo run -p patchwright-cli -- auth login
+cargo run -p patchwright-cli -- auth check
 cargo run -p patchwright-cli -- config check
 cargo run -p patchwright-cli -- config check --repo .
 cargo run -p patchwright-cli -- verify --repo .
 cargo run -p patchwright-cli -- solve --repo . --task "summarize" --dry-run --info-only
 ```
+
+Run the first manual end-to-end fixture demo after `codex login`:
+
+```bash
+bash scripts/demo-add-wrong-operator.sh
+```
+
+The demo copies `fixtures/rust/add_wrong_operator` to `/tmp`, initializes that copy as an independent git repository, commits the broken fixture, runs the failing test, asks Patchwright to solve it through the Codex CLI provider, and then runs the test again. The fixture template in this repository is not modified.
 
 ## Project Config
 
@@ -42,6 +52,7 @@ api_key_env = "OPENAI_API_KEY"
 [model.codex_cli]
 command = "codex"
 model = "gpt-5.1-codex"
+timeout_seconds = 120
 
 [model.openai]
 base_url = "https://api.openai.com/v1"

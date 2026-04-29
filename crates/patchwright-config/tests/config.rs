@@ -12,6 +12,7 @@ fn defaults_match_v0_1_plan() {
     assert_eq!(config.model.api_key_env, "OPENAI_API_KEY");
     assert_eq!(config.model.codex_cli.command, "codex");
     assert_eq!(config.model.codex_cli.model, None);
+    assert_eq!(config.model.codex_cli.timeout_seconds, 120);
     assert_eq!(config.model.openai.base_url, None);
     assert_eq!(config.model.openai.model, None);
     assert_eq!(config.model.openai.api_key_env, None);
@@ -40,6 +41,7 @@ api_key_env = "PATCHWRIGHT_TEST_KEY"
 [model.codex_cli]
 command = "codex-test"
 model = "codex-test-model"
+timeout_seconds = 11
 
 [model.openai]
 base_url = "http://nested.invalid/v1"
@@ -69,6 +71,7 @@ clippy = true
         config.model.codex_cli.model,
         Some("codex-test-model".to_owned())
     );
+    assert_eq!(config.model.codex_cli.timeout_seconds, 11);
     assert_eq!(
         config.model.openai.base_url,
         Some("http://nested.invalid/v1".to_owned())
@@ -121,11 +124,17 @@ fn rejects_zero_diff_limits() {
 #[test]
 fn rejects_empty_codex_command_and_zero_openai_timeout() {
     let command = PatchwrightConfig::from_toml_str("[model.codex_cli]\ncommand = \"\"\n");
+    let codex_timeout =
+        PatchwrightConfig::from_toml_str("[model.codex_cli]\ntimeout_seconds = 0\n");
     let timeout = PatchwrightConfig::from_toml_str("[model.openai]\ntimeout_seconds = 0\n");
 
     assert!(matches!(
         command,
         Err(PatchwrightError::InvalidInput(message)) if message.contains("model.codex_cli.command")
+    ));
+    assert!(matches!(
+        codex_timeout,
+        Err(PatchwrightError::InvalidInput(message)) if message.contains("model.codex_cli.timeout_seconds")
     ));
     assert!(matches!(
         timeout,

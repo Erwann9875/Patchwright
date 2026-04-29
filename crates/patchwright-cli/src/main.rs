@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use patchwright_config::{ModelProviderKind, PatchwrightConfig, RustConfig};
-use patchwright_core::agent::{Agent, SolveStatus};
+use patchwright_core::agent::{Agent, SolveReport};
 use patchwright_core::error::Result as PatchwrightResult;
 use patchwright_core::policy::Policy;
 use patchwright_core::traits::{LanguageAdapter, ModelProvider, Verifier};
@@ -17,7 +17,7 @@ use patchwright_verify::PlanVerifier;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
 fn main() -> ExitCode {
     match run(env::args().skip(1)) {
@@ -54,6 +54,8 @@ where
             println!("{}", run_config_check(&args)?);
             Ok(())
         }
+        "auth" if args.get(1).map(String::as_str) == Some("login") => run_auth_login(&args),
+        "auth" if args.get(1).map(String::as_str) == Some("check") => run_auth_check(&args),
         "bench" if args.get(1).map(String::as_str) == Some("startup") => run_startup_bench(),
         "solve" => run_solve(&args),
         "verify" => run_verify(&args),
@@ -93,10 +95,7 @@ fn run_solve(args: &[String]) -> Result<(), String> {
                 .with_require_patch(options.require_patch),
         )
         .map_err(|error| error.to_string())?;
-    println!("solve status: {:?}", report.status);
-    if report.status != SolveStatus::Accepted {
-        println!("{}", report.summary);
-    }
+    println!("{}", render_solve_report(&report));
 
     Ok(())
 }
@@ -166,6 +165,7 @@ fn solve_options(args: &[String]) -> Result<SolveOptions, String> {
         codex_cli: CodexCliConfig {
             command: config.model.codex_cli.command,
             model: codex_model,
+            timeout_seconds: config.model.codex_cli.timeout_seconds,
         },
         max_steps: flags.max_steps.unwrap_or(config.agent.max_steps),
         require_patch: if flags.info_only {
@@ -312,8 +312,58 @@ fn run_config_check(args: &[String]) -> Result<String, String> {
     ))
 }
 
+fn run_auth_login(args: &[String]) -> Result<(), String> {
+    let config = auth_codex_config(args)?;
+    let status = Command::new(&config.command)
+        .arg("login")
+        .status()
+        .map_err(|error| {
+            format!(
+                "failed to start codex command '{}': {error}",
+                config.command
+            )
+        })?;
+
+    if !status.success() {
+        return Err(format!(
+            "codex login failed with status {:?}",
+            status.code()
+        ));
+    }
+
+    Ok(())
+}
+
+fn run_auth_check(args: &[String]) -> Result<(), String> {
+    let config = auth_codex_config(args)?;
+    CodexCliClient::new(config)
+        .check_auth()
+        .map_err(|error| error.to_string())?;
+    println!("auth: ok");
+    Ok(())
+}
+
+fn auth_codex_config(args: &[String]) -> Result<CodexCliConfig, String> {
+    let repo = command_repo(args, 2, "auth")?;
+    let config = PatchwrightConfig::load(&repo).map_err(|error| error.to_string())?;
+
+    Ok(CodexCliConfig {
+        command: config.model.codex_cli.command,
+        model: config.model.codex_cli.model.or(config.model.model),
+        timeout_seconds: config.model.codex_cli.timeout_seconds,
+    })
+}
+
 fn config_check_repo(args: &[String]) -> Result<PathBuf, String> {
-    let mut index = 2;
+    command_repo(args, 2, "config check")
+}
+
+fn command_repo(
+    args: &[String],
+    start_index: usize,
+    command_name: &str,
+) -> Result<PathBuf, String> {
+    let mut index = start_index;
     let mut repo = None;
 
     while index < args.len() {
@@ -321,19 +371,19 @@ fn config_check_repo(args: &[String]) -> Result<PathBuf, String> {
         match arg.as_str() {
             "--repo" => {
                 let Some(value) = args.get(index + 1) else {
-                    return Err("config check requires --repo <path>".to_owned());
+                    return Err(format!("{command_name} requires --repo <path>"));
                 };
                 if value.starts_with("--") {
-                    return Err("config check requires --repo <path>".to_owned());
+                    return Err(format!("{command_name} requires --repo <path>"));
                 }
                 repo = Some(value.clone());
                 index += 2;
             }
             value if value.starts_with("--") => {
-                return Err(format!("unknown config check flag: {value}"));
+                return Err(format!("unknown {command_name} flag: {value}"));
             }
             value => {
-                return Err(format!("unexpected config check argument: {value}"));
+                return Err(format!("unexpected {command_name} argument: {value}"));
             }
         }
     }
@@ -418,6 +468,70 @@ fn run_startup_bench() -> Result<(), String> {
     let average_micros = startup_average_micros(total_nanos, iterations);
     println!("startup_version_average_micros={average_micros}");
     Ok(())
+}
+
+fn render_solve_report(report: &SolveReport) -> String {
+    let mut output = String::new();
+
+    output.push_str("Patchwright solve result\n\n");
+    output.push_str(&format!("Status: {:?}\n\n", report.status));
+    output.push_str("Changed files:\n");
+    let changed_files = report
+        .attempts
+        .last()
+        .map(|attempt| &attempt.verification.diff_summary.changed_files)
+        .filter(|files| !files.is_empty());
+    if let Some(files) = changed_files {
+        for path in files {
+            output.push_str(&format!("  {}\n", path.0));
+        }
+    } else {
+        output.push_str("  none\n");
+    }
+
+    output.push_str("\nVerification:\n");
+    let checks = report
+        .attempts
+        .last()
+        .map(|attempt| &attempt.verification.checks)
+        .filter(|checks| !checks.is_empty());
+    if let Some(checks) = checks {
+        for check in checks {
+            let status = if check.passed { "ok" } else { "failed" };
+            output.push_str(&format!("  [{status}] {}\n", check.name));
+        }
+    } else {
+        output.push_str("  none\n");
+    }
+
+    output.push_str(&format!("\nAttempts: {}\n", report.attempts.len()));
+
+    if !report.counterexamples.is_empty() {
+        output.push_str("\nCounterexamples:\n");
+        for counterexample in report.counterexamples.iter().take(3) {
+            output.push_str(&format!(
+                "  [{}] {}\n",
+                counterexample.source,
+                first_useful_line(&counterexample.detail)
+            ));
+        }
+    }
+
+    output.push_str("\nSummary:\n");
+    output.push_str(&format!("  {}\n", first_useful_line(&report.summary)));
+
+    output
+}
+
+fn first_useful_line(value: &str) -> String {
+    value
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("none")
+        .chars()
+        .take(240)
+        .collect()
 }
 
 fn startup_average_micros(total_nanos: u128, iterations: u128) -> u128 {
@@ -525,7 +639,7 @@ fn accessible_repo_path(path: &str) -> Result<PathBuf, String> {
 
 fn print_help() {
     println!(
-        "patchwright\n\nUSAGE:\n    patchwright --version\n    patchwright status\n    patchwright config check [--repo <path>]\n    patchwright bench startup\n    patchwright solve --repo <path> --task <text> [--dry-run] [--model-provider codex-cli|openai-compatible] [--model <name>] [--base-url <url>] [--api-key-env <name>] [--max-steps <n>] [--info-only]\n    patchwright verify --repo <path>"
+        "patchwright\n\nUSAGE:\n    patchwright --version\n    patchwright status\n    patchwright auth login [--repo <path>]\n    patchwright auth check [--repo <path>]\n    patchwright config check [--repo <path>]\n    patchwright bench startup\n    patchwright solve --repo <path> --task <text> [--dry-run] [--model-provider codex-cli|openai-compatible] [--model <name>] [--base-url <url>] [--api-key-env <name>] [--max-steps <n>] [--info-only]\n    patchwright verify --repo <path>"
     );
 }
 
@@ -533,10 +647,15 @@ fn print_help() {
 mod tests {
     use super::run;
     use patchwright_config::{ModelProviderKind, RustConfig};
+    use patchwright_core::agent::{SolveReport, SolveStatus};
     use patchwright_core::traits::LanguageAdapter;
-    use patchwright_core::types::{RepoView, TaskSpec};
+    use patchwright_core::types::{
+        Attempt, CheckReport, Counterexample, DiffSummary, RepoPath, RepoView, TaskSpec,
+        VerificationReport, VerificationStatus,
+    };
     use patchwright_test_support::TempRepo;
-    use std::path::PathBuf;
+    use std::fs;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn version_route_returns_before_heavy_commands() {
@@ -608,6 +727,101 @@ mod tests {
         ]);
 
         assert!(matches!(result, Err(message) if message.contains("repo path is not a directory")));
+    }
+
+    #[test]
+    fn auth_login_invokes_configured_codex_login() {
+        let repo = TempRepo::new("cli-auth-login");
+        let script = fake_auth_codex_script(repo.root(), true);
+        repo.write(
+            "patchwright.toml",
+            &format!(
+                "[model.codex_cli]\ncommand = \"{}\"\n",
+                toml_escape_path(&script)
+            ),
+        );
+
+        let result = run([
+            "auth".to_owned(),
+            "login".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+        ]);
+
+        assert_eq!(result, Ok(()));
+        let args = fs::read_to_string(repo.root().join("auth-args.txt")).unwrap();
+        assert!(args.contains("login"));
+    }
+
+    #[test]
+    fn auth_check_fails_clearly_when_codex_is_missing() {
+        let repo = TempRepo::new("cli-auth-check-missing");
+        repo.write(
+            "patchwright.toml",
+            "[model.codex_cli]\ncommand = \"missing-patchwright-codex-test-bin\"\n",
+        );
+
+        let result = run([
+            "auth".to_owned(),
+            "check".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+        ]);
+
+        assert!(
+            matches!(result, Err(ref message) if message.contains("failed to start codex command")),
+            "unexpected result: {result:?}"
+        );
+    }
+
+    #[test]
+    fn auth_check_succeeds_with_structured_codex_output() {
+        let repo = TempRepo::new("cli-auth-check-ok");
+        let script = fake_auth_codex_script(repo.root(), true);
+        repo.write(
+            "patchwright.toml",
+            &format!(
+                "[model.codex_cli]\ncommand = \"{}\"\n",
+                toml_escape_path(&script)
+            ),
+        );
+
+        let result = run([
+            "auth".to_owned(),
+            "check".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+        ]);
+
+        assert_eq!(result, Ok(()));
+        let args = fs::read_to_string(repo.root().join("auth-args.txt")).unwrap();
+        assert!(args.contains("exec"));
+        assert!(args.contains("--output-schema"));
+    }
+
+    #[test]
+    fn auth_check_fails_when_codex_exec_cannot_use_login() {
+        let repo = TempRepo::new("cli-auth-check-not-logged-in");
+        let script = fake_auth_codex_script(repo.root(), false);
+        repo.write(
+            "patchwright.toml",
+            &format!(
+                "[model.codex_cli]\ncommand = \"{}\"\n",
+                toml_escape_path(&script)
+            ),
+        );
+
+        let result = run([
+            "auth".to_owned(),
+            "check".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+        ]);
+
+        assert!(
+            matches!(result, Err(ref message) if message.contains("codex auth check failed")),
+            "unexpected result: {result:?}"
+        );
     }
 
     #[test]
@@ -1013,5 +1227,169 @@ mod tests {
     #[test]
     fn startup_benchmark_reports_micros_not_nanos() {
         assert_eq!(super::startup_average_micros(40_000, 20), 2);
+    }
+
+    #[test]
+    fn solve_report_for_accepted_patch_shows_changed_files_and_checks() {
+        let report = SolveReport {
+            status: SolveStatus::Accepted,
+            summary: "Fixed add implementation from subtraction to addition.".to_owned(),
+            attempts: vec![Attempt {
+                patch_id: None,
+                verification: VerificationReport {
+                    status: VerificationStatus::Accepted,
+                    checks: vec![
+                        CheckReport {
+                            name: "cargo fmt -- --check".to_owned(),
+                            command: None,
+                            passed: true,
+                            summary: "passed".to_owned(),
+                        },
+                        CheckReport {
+                            name: "cargo test".to_owned(),
+                            command: None,
+                            passed: true,
+                            summary: "passed".to_owned(),
+                        },
+                    ],
+                    counterexamples: Vec::new(),
+                    diff_summary: DiffSummary {
+                        changed_files: vec![RepoPath::new("src/lib.rs")],
+                        inserted_lines: 1,
+                        deleted_lines: 1,
+                    },
+                    policy_events: Vec::new(),
+                },
+            }],
+            observations: Vec::new(),
+            counterexamples: Vec::new(),
+        };
+
+        let output = super::render_solve_report(&report);
+
+        assert!(output.contains("Patchwright solve result"));
+        assert!(output.contains("Status: Accepted"));
+        assert!(output.contains("Changed files:\n  src/lib.rs"));
+        assert!(output.contains("Verification:\n  [ok] cargo fmt -- --check"));
+        assert!(output.contains("  [ok] cargo test"));
+        assert!(output.contains("Attempts: 1"));
+        assert!(output.contains("Summary:\n  Fixed add implementation"));
+    }
+
+    #[test]
+    fn solve_report_for_rejection_shows_first_counterexample() {
+        let report = SolveReport {
+            status: SolveStatus::BudgetExhausted,
+            summary: "step budget exhausted".to_owned(),
+            attempts: Vec::new(),
+            observations: Vec::new(),
+            counterexamples: vec![Counterexample {
+                source: "cargo".to_owned(),
+                detail: "assertion failed: expected 5, got -1\nsecond line".to_owned(),
+            }],
+        };
+
+        let output = super::render_solve_report(&report);
+
+        assert!(output.contains("Status: BudgetExhausted"));
+        assert!(output.contains("Attempts: 0"));
+        assert!(output.contains("Counterexamples:"));
+        assert!(output.contains("assertion failed: expected 5, got -1"));
+        assert!(!output.contains("second line"));
+    }
+
+    fn toml_escape_path(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "\\\\")
+    }
+
+    #[cfg(windows)]
+    fn fake_auth_codex_script(root: &Path, succeeds: bool) -> PathBuf {
+        let script = root.join(if succeeds {
+            "fake-auth-codex-ok.cmd"
+        } else {
+            "fake-auth-codex-fail.cmd"
+        });
+        let exit_code = if succeeds { 0 } else { 1 };
+        let action = if succeeds {
+            r#"echo {"status":"ok"}>"%output%""#
+        } else {
+            r#"echo not logged in 1>&2"#
+        };
+        fs::write(
+            &script,
+            format!(
+                r#"@echo off
+setlocal
+echo %*>"{}"
+if "%~1"=="login" exit /b 0
+set output=
+:loop
+if "%~1"=="" goto after_args
+if "%~1"=="-o" set output=%~2
+shift
+goto loop
+:after_args
+more > "{}"
+{}
+exit /b {}
+"#,
+                root.join("auth-args.txt").display(),
+                root.join("auth-stdin.txt").display(),
+                action,
+                exit_code
+            ),
+        )
+        .expect("fake auth codex script should be written");
+        script
+    }
+
+    #[cfg(not(windows))]
+    fn fake_auth_codex_script(root: &Path, succeeds: bool) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = root.join(if succeeds {
+            "fake-auth-codex-ok"
+        } else {
+            "fake-auth-codex-fail"
+        });
+        let exit_code = if succeeds { 0 } else { 1 };
+        let write_status = if succeeds {
+            r#"printf '%s\n' '{"status":"ok"}' > "$output""#
+        } else {
+            r#"printf '%s\n' 'not logged in' >&2"#
+        };
+        fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" > "{}"
+if [ "$1" = "login" ]; then
+  exit 0
+fi
+output=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    output="$1"
+  fi
+  shift
+done
+cat > "{}"
+{}
+exit {}
+"#,
+                root.join("auth-args.txt").display(),
+                root.join("auth-stdin.txt").display(),
+                write_status,
+                exit_code
+            ),
+        )
+        .expect("fake auth codex script should be written");
+        let mut permissions = fs::metadata(&script)
+            .expect("fake auth codex metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("fake auth codex should be executable");
+        script
     }
 }

@@ -317,6 +317,7 @@ dependencies = [
  "patchwright-core",
  "patchwright-model-contract",
  "patchwright-test-support",
+ "serde_json",
 ]
 
 [[package]]
