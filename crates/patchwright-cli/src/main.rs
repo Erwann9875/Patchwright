@@ -49,10 +49,7 @@ where
             println!("config: no config file required for this command");
             Ok(())
         }
-        "bench" if args.get(1).map(String::as_str) == Some("startup") => {
-            println!("startup benchmark command registered");
-            Ok(())
-        }
+        "bench" if args.get(1).map(String::as_str) == Some("startup") => run_startup_bench(),
         "solve" => run_solve(&args),
         "verify" => run_verify(&args),
         other => Err(format!("unknown command: {other}")),
@@ -123,6 +120,32 @@ fn run_verify(args: &[String]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn run_startup_bench() -> Result<(), String> {
+    let exe = env::current_exe().map_err(|error| error.to_string())?;
+    let iterations = 20;
+    let mut total_nanos = 0u128;
+
+    for _ in 0..iterations {
+        let start = std::time::Instant::now();
+        let output = std::process::Command::new(&exe)
+            .arg("--version")
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err("startup benchmark child command failed".to_owned());
+        }
+        total_nanos += start.elapsed().as_nanos();
+    }
+
+    let average_micros = startup_average_micros(total_nanos, iterations);
+    println!("startup_version_average_micros={average_micros}");
+    Ok(())
+}
+
+fn startup_average_micros(total_nanos: u128, iterations: u128) -> u128 {
+    total_nanos / iterations / 1_000
 }
 
 fn value_after(args: &[String], flag: &str) -> Option<String> {
@@ -225,5 +248,10 @@ mod tests {
             result,
             Err("repo path is not accessible: missing-repo-for-cli-test".to_owned())
         );
+    }
+
+    #[test]
+    fn startup_benchmark_reports_micros_not_nanos() {
+        assert_eq!(super::startup_average_micros(40_000, 20), 2);
     }
 }
