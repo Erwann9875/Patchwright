@@ -403,6 +403,8 @@ Normal tests must be offline. Network and live model tests are opt-in.
 
 ## GitHub Workflow Conventions
 
+The GitHub-facing contributor guide lives in `CONTRIBUTING.md`. This section records the architectural decision behind that workflow.
+
 Patchwright uses Conventional Commits for commit messages and pull request titles:
 
 ```text
