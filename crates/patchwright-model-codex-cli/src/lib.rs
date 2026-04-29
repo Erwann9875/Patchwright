@@ -309,16 +309,19 @@ fn run_codex_login(command: &str) -> Result<ExitStatus> {
 }
 
 fn command_candidates(command: &str) -> Vec<String> {
-    let mut candidates = vec![command.to_owned()];
-
     #[cfg(windows)]
     {
+        let mut candidates = vec![command.to_owned()];
         if Path::new(command).extension().is_none() {
             candidates.push(format!("{command}.cmd"));
         }
+        candidates
     }
 
-    candidates
+    #[cfg(not(windows))]
+    {
+        vec![command.to_owned()]
+    }
 }
 
 #[cfg(unix)]
