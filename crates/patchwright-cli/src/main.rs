@@ -10,7 +10,7 @@ use patchwright_core::types::{
     PlanStep, RepoView, Risk, TaskSpec, VerificationStatus,
 };
 use patchwright_exec_local::{GitWorktreeSandbox, LocalExecution};
-use patchwright_index::BasicIndexer;
+use patchwright_index::{profile_project, BasicIndexer, ProjectProfile};
 use patchwright_lang_rust::RustAdapter;
 use patchwright_model_codex_cli::{CodexCliClient, CodexCliConfig};
 use patchwright_model_openai::{OpenAiCompatibleClient, OpenAiConfig};
@@ -60,11 +60,74 @@ where
         "auth" if args.get(1).map(String::as_str) == Some("login") => run_auth_login(&args),
         "auth" if args.get(1).map(String::as_str) == Some("check") => run_auth_check(&args),
         "bench" if args.get(1).map(String::as_str) == Some("startup") => run_startup_bench(),
+        "profile" => run_profile(&args),
         "design" => run_design(&args),
         "solve" => run_solve(&args),
         "verify" => run_verify(&args),
         other => Err(format!("unknown command: {other}")),
     }
+}
+
+fn run_profile(args: &[String]) -> Result<(), String> {
+    let repo = command_repo(args, 1, "profile")?;
+    let profile = profile_project(&repo).map_err(|error| error.to_string())?;
+    println!("{}", render_project_profile(&profile));
+    Ok(())
+}
+
+fn render_project_profile(profile: &ProjectProfile) -> String {
+    let mut output = String::new();
+
+    output.push_str("Patchwright project profile\n\n");
+    push_plain_list(
+        &mut output,
+        "Detected languages",
+        &profile.detected_languages,
+    );
+    let manifests = repo_paths_as_strings(&profile.manifests);
+    push_plain_list(&mut output, "Manifests", &manifests);
+    push_plain_list(&mut output, "Package managers", &profile.package_managers);
+    push_plain_list(
+        &mut output,
+        "Likely install commands",
+        &profile.install_commands,
+    );
+    push_plain_list(
+        &mut output,
+        "Likely build commands",
+        &profile.build_commands,
+    );
+    push_plain_list(&mut output, "Likely test commands", &profile.test_commands);
+    push_plain_list(
+        &mut output,
+        "Likely typecheck commands",
+        &profile.typecheck_commands,
+    );
+    push_plain_list(&mut output, "Likely lint commands", &profile.lint_commands);
+    let source_roots = repo_paths_as_strings(&profile.source_roots);
+    push_plain_list(&mut output, "Source roots", &source_roots);
+    let test_roots = repo_paths_as_strings(&profile.test_roots);
+    push_plain_list(&mut output, "Test roots", &test_roots);
+    let ci_files = repo_paths_as_strings(&profile.ci_files);
+    push_plain_list(&mut output, "CI files", &ci_files);
+
+    output
+}
+
+fn push_plain_list(output: &mut String, heading: &str, items: &[String]) {
+    output.push_str(&format!("{heading}:\n"));
+    if items.is_empty() {
+        output.push_str("  none\n\n");
+        return;
+    }
+    for item in items {
+        output.push_str(&format!("  {item}\n"));
+    }
+    output.push('\n');
+}
+
+fn repo_paths_as_strings(paths: &[patchwright_core::types::RepoPath]) -> Vec<String> {
+    paths.iter().map(|path| path.0.clone()).collect()
 }
 
 fn run_solve(args: &[String]) -> Result<(), String> {
@@ -1224,7 +1287,7 @@ fn accessible_repo_path(path: &str) -> Result<PathBuf, String> {
 
 fn print_help() {
     println!(
-        "patchwright\n\nUSAGE:\n    patchwright --version\n    patchwright status\n    patchwright auth login [--repo <path>]\n    patchwright auth check [--repo <path>]\n    patchwright config check [--repo <path>]\n    patchwright bench startup\n    patchwright design --repo <path> --task <text> [--dry-run] [--model-provider codex-cli|openai-compatible] [--model <name>] [--base-url <url>] [--api-key-env <name>]\n    patchwright solve --repo <path> --task <text> [--dry-run] [--model-provider codex-cli|openai-compatible] [--model <name>] [--base-url <url>] [--api-key-env <name>] [--max-steps <n>] [--info-only]\n    patchwright verify --repo <path>"
+        "patchwright\n\nUSAGE:\n    patchwright --version\n    patchwright status\n    patchwright auth login [--repo <path>]\n    patchwright auth check [--repo <path>]\n    patchwright config check [--repo <path>]\n    patchwright bench startup\n    patchwright profile [--repo <path>]\n    patchwright design --repo <path> --task <text> [--dry-run] [--model-provider codex-cli|openai-compatible] [--model <name>] [--base-url <url>] [--api-key-env <name>]\n    patchwright solve --repo <path> --task <text> [--dry-run] [--model-provider codex-cli|openai-compatible] [--model <name>] [--base-url <url>] [--api-key-env <name>] [--max-steps <n>] [--info-only]\n    patchwright verify --repo <path>"
     );
 }
 
@@ -1940,6 +2003,39 @@ mod tests {
         assert!(content.contains("## Current Architecture"));
         assert!(content.contains("## Implementation Plan"));
         assert!(content.contains("src/lib.rs"));
+    }
+
+    #[test]
+    fn profile_command_runs_without_model_call() {
+        let repo = TempRepo::new("cli-profile");
+        repo.write("Cargo.toml", "[package]\nname = \"cli_profile\"\n");
+        repo.write("src/lib.rs", "pub fn ok() {}\n");
+        repo.write("tests/smoke.rs", "#[test]\nfn smoke() {}\n");
+
+        let result = run([
+            "profile".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+        ]);
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn profile_renderer_shows_detected_languages_and_commands() {
+        let repo = TempRepo::new("cli-profile-render");
+        repo.write("package.json", "{}\n");
+        repo.write("tsconfig.json", "{}\n");
+        repo.write("src/index.ts", "export const ok = true;\n");
+
+        let profile = patchwright_index::profile_project(repo.root()).unwrap();
+        let output = super::render_project_profile(&profile);
+
+        assert!(output.contains("Patchwright project profile"));
+        assert!(output.contains("Detected languages:\n  TypeScript\n  JavaScript"));
+        assert!(output.contains("Package managers:\n  npm"));
+        assert!(output.contains("Likely test commands:\n  npm test"));
+        assert!(output.contains("Source roots:\n  src"));
     }
 
     fn toml_escape_path(path: &Path) -> String {

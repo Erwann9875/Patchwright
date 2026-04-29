@@ -18,6 +18,21 @@ pub struct BasicIndexer {
     root: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProjectProfile {
+    pub detected_languages: Vec<String>,
+    pub manifests: Vec<RepoPath>,
+    pub package_managers: Vec<String>,
+    pub install_commands: Vec<String>,
+    pub build_commands: Vec<String>,
+    pub test_commands: Vec<String>,
+    pub typecheck_commands: Vec<String>,
+    pub lint_commands: Vec<String>,
+    pub source_roots: Vec<RepoPath>,
+    pub test_roots: Vec<RepoPath>,
+    pub ci_files: Vec<RepoPath>,
+}
+
 impl BasicIndexer {
     pub fn new(root: impl AsRef<Path>) -> Self {
         let root = fs::canonicalize(root.as_ref())
@@ -25,6 +40,44 @@ impl BasicIndexer {
 
         Self { root }
     }
+}
+
+pub fn profile_project(root: impl AsRef<Path>) -> Result<ProjectProfile> {
+    let indexer = BasicIndexer::new(root);
+    let files = indexer.list_files(FileQuery::default())?;
+    let paths = files
+        .iter()
+        .map(|file| file.path.0.as_str())
+        .collect::<Vec<_>>();
+
+    let mut profile = ProjectProfile {
+        manifests: files
+            .iter()
+            .filter(|file| is_project_manifest(&file.path.0))
+            .map(|file| file.path.clone())
+            .collect(),
+        source_roots: detect_roots(&paths, source_root_candidates()),
+        test_roots: detect_roots(&paths, test_root_candidates()),
+        ci_files: files
+            .iter()
+            .filter(|file| is_ci_file(&file.path.0))
+            .map(|file| file.path.clone())
+            .collect(),
+        ..ProjectProfile::default()
+    };
+
+    detect_rust_profile(&paths, &mut profile);
+    detect_javascript_profile(&paths, &mut profile);
+    detect_python_profile(&paths, &mut profile);
+    detect_go_profile(&paths, &mut profile);
+    detect_java_profile(&paths, &mut profile);
+    detect_dotnet_profile(&paths, &mut profile);
+    detect_php_profile(&paths, &mut profile);
+    detect_ruby_profile(&paths, &mut profile);
+    detect_cpp_profile(&paths, &mut profile);
+    detect_terraform_profile(&paths, &mut profile);
+
+    Ok(profile)
 }
 
 impl Indexer for BasicIndexer {
@@ -124,6 +177,247 @@ impl Indexer for BasicIndexer {
             recent_observations: observations.iter().rev().take(8).cloned().collect(),
             counterexamples: counterexamples.to_vec(),
         })
+    }
+}
+
+fn detect_rust_profile(paths: &[&str], profile: &mut ProjectProfile) {
+    if !has_path(paths, "Cargo.toml") {
+        return;
+    }
+
+    push_unique(&mut profile.detected_languages, "Rust");
+    push_unique(&mut profile.package_managers, "cargo");
+    push_unique(&mut profile.build_commands, "cargo build");
+    push_unique(&mut profile.test_commands, "cargo test");
+    push_unique(&mut profile.typecheck_commands, "cargo check");
+    push_unique(&mut profile.lint_commands, "cargo clippy");
+}
+
+fn detect_javascript_profile(paths: &[&str], profile: &mut ProjectProfile) {
+    if !has_path(paths, "package.json") && !has_path(paths, "tsconfig.json") {
+        return;
+    }
+
+    if has_path(paths, "tsconfig.json") || paths.iter().any(|path| path.ends_with(".ts")) {
+        push_unique(&mut profile.detected_languages, "TypeScript");
+    }
+    if has_path(paths, "package.json") {
+        push_unique(&mut profile.detected_languages, "JavaScript");
+    }
+
+    let package_manager = javascript_package_manager(paths);
+    push_unique(&mut profile.package_managers, package_manager);
+    push_unique(
+        &mut profile.install_commands,
+        format!("{package_manager} install"),
+    );
+    push_unique(
+        &mut profile.build_commands,
+        format!("{package_manager} build"),
+    );
+    push_unique(
+        &mut profile.test_commands,
+        format!("{package_manager} test"),
+    );
+    push_unique(
+        &mut profile.typecheck_commands,
+        format!("{package_manager} tsc --noEmit"),
+    );
+    push_unique(
+        &mut profile.lint_commands,
+        format!("{package_manager} lint"),
+    );
+}
+
+fn detect_python_profile(paths: &[&str], profile: &mut ProjectProfile) {
+    if !has_path(paths, "pyproject.toml") && !has_path(paths, "requirements.txt") {
+        return;
+    }
+
+    push_unique(&mut profile.detected_languages, "Python");
+    let package_manager = python_package_manager(paths);
+    push_unique(&mut profile.package_managers, package_manager);
+    match package_manager {
+        "uv" => push_unique(&mut profile.install_commands, "uv sync"),
+        "poetry" => push_unique(&mut profile.install_commands, "poetry install"),
+        _ => push_unique(
+            &mut profile.install_commands,
+            "python -m pip install -r requirements.txt",
+        ),
+    }
+    push_unique(&mut profile.test_commands, "python -m pytest");
+    push_unique(&mut profile.typecheck_commands, "python -m mypy .");
+    push_unique(&mut profile.lint_commands, "python -m ruff check .");
+}
+
+fn detect_go_profile(paths: &[&str], profile: &mut ProjectProfile) {
+    if !has_path(paths, "go.mod") {
+        return;
+    }
+
+    push_unique(&mut profile.detected_languages, "Go");
+    push_unique(&mut profile.package_managers, "go");
+    push_unique(&mut profile.build_commands, "go build ./...");
+    push_unique(&mut profile.test_commands, "go test ./...");
+    push_unique(&mut profile.lint_commands, "go vet ./...");
+}
+
+fn detect_java_profile(paths: &[&str], profile: &mut ProjectProfile) {
+    if has_path(paths, "pom.xml") {
+        push_unique(&mut profile.detected_languages, "Java");
+        push_unique(&mut profile.package_managers, "maven");
+        push_unique(&mut profile.build_commands, "mvn package");
+        push_unique(&mut profile.test_commands, "mvn test");
+    }
+    if has_path(paths, "build.gradle") || has_path(paths, "build.gradle.kts") {
+        push_unique(&mut profile.detected_languages, "Java");
+        push_unique(&mut profile.package_managers, "gradle");
+        push_unique(&mut profile.build_commands, "gradle build");
+        push_unique(&mut profile.test_commands, "gradle test");
+    }
+}
+
+fn detect_dotnet_profile(paths: &[&str], profile: &mut ProjectProfile) {
+    if !paths
+        .iter()
+        .any(|path| path.ends_with(".csproj") || path.ends_with(".sln"))
+    {
+        return;
+    }
+
+    push_unique(&mut profile.detected_languages, ".NET");
+    push_unique(&mut profile.package_managers, "dotnet");
+    push_unique(&mut profile.build_commands, "dotnet build");
+    push_unique(&mut profile.test_commands, "dotnet test");
+}
+
+fn detect_php_profile(paths: &[&str], profile: &mut ProjectProfile) {
+    if !has_path(paths, "composer.json") {
+        return;
+    }
+
+    push_unique(&mut profile.detected_languages, "PHP");
+    push_unique(&mut profile.package_managers, "composer");
+    push_unique(&mut profile.install_commands, "composer install");
+    push_unique(&mut profile.test_commands, "composer test");
+}
+
+fn detect_ruby_profile(paths: &[&str], profile: &mut ProjectProfile) {
+    if !has_path(paths, "Gemfile") {
+        return;
+    }
+
+    push_unique(&mut profile.detected_languages, "Ruby");
+    push_unique(&mut profile.package_managers, "bundler");
+    push_unique(&mut profile.install_commands, "bundle install");
+    push_unique(&mut profile.test_commands, "bundle exec rspec");
+}
+
+fn detect_cpp_profile(paths: &[&str], profile: &mut ProjectProfile) {
+    if !has_path(paths, "CMakeLists.txt") {
+        return;
+    }
+
+    push_unique(&mut profile.detected_languages, "C/C++");
+    push_unique(&mut profile.package_managers, "cmake");
+    push_unique(&mut profile.build_commands, "cmake --build build");
+    push_unique(&mut profile.test_commands, "ctest --test-dir build");
+}
+
+fn detect_terraform_profile(paths: &[&str], profile: &mut ProjectProfile) {
+    if !paths.iter().any(|path| path.ends_with(".tf")) {
+        return;
+    }
+
+    push_unique(&mut profile.detected_languages, "Terraform");
+    push_unique(&mut profile.package_managers, "terraform");
+    push_unique(&mut profile.build_commands, "terraform validate");
+    push_unique(&mut profile.lint_commands, "terraform fmt -check");
+}
+
+fn javascript_package_manager(paths: &[&str]) -> &'static str {
+    if has_path(paths, "pnpm-lock.yaml") {
+        "pnpm"
+    } else if has_path(paths, "yarn.lock") {
+        "yarn"
+    } else {
+        "npm"
+    }
+}
+
+fn python_package_manager(paths: &[&str]) -> &'static str {
+    if has_path(paths, "uv.lock") {
+        "uv"
+    } else if has_path(paths, "poetry.lock") {
+        "poetry"
+    } else {
+        "pip"
+    }
+}
+
+fn detect_roots(paths: &[&str], candidates: &[&str]) -> Vec<RepoPath> {
+    candidates
+        .iter()
+        .filter(|candidate| {
+            paths
+                .iter()
+                .any(|path| path_starts_with_root(path, candidate))
+        })
+        .map(|candidate| RepoPath::new(*candidate))
+        .collect()
+}
+
+fn source_root_candidates() -> &'static [&'static str] {
+    &["app", "cmd", "crates", "lib", "pages", "pkg", "src"]
+}
+
+fn test_root_candidates() -> &'static [&'static str] {
+    &["__tests__", "spec", "test", "tests"]
+}
+
+fn path_starts_with_root(path: &str, root: &str) -> bool {
+    path == root || path.starts_with(&format!("{root}/"))
+}
+
+fn is_project_manifest(path: &str) -> bool {
+    matches!(
+        path,
+        "Cargo.toml"
+            | "package.json"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "tsconfig.json"
+            | "pyproject.toml"
+            | "requirements.txt"
+            | "uv.lock"
+            | "poetry.lock"
+            | "go.mod"
+            | "pom.xml"
+            | "build.gradle"
+            | "build.gradle.kts"
+            | "composer.json"
+            | "Gemfile"
+            | "CMakeLists.txt"
+    ) || path.ends_with(".csproj")
+        || path.ends_with(".sln")
+}
+
+fn is_ci_file(path: &str) -> bool {
+    path.starts_with(".github/workflows/")
+        || path.starts_with(".gitlab-ci")
+        || path == "Jenkinsfile"
+        || path.starts_with(".circleci/")
+}
+
+fn has_path(paths: &[&str], expected: &str) -> bool {
+    paths.contains(&expected)
+}
+
+fn push_unique(values: &mut Vec<String>, value: impl Into<String>) {
+    let value = value.into();
+    if !values.contains(&value) {
+        values.push(value);
     }
 }
 
