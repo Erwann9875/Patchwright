@@ -53,37 +53,41 @@ pub fn render_exec_prompt(request: &ModelRequest) -> String {
 
 pub fn action_output_schema() -> Value {
     json!({
-        "oneOf": [
-            object_schema(
-                [("action", json!({"const": "read_file"})), ("path", json!({"type": "string"}))],
-                ["action", "path"],
-                [("start", json!({"type": "integer", "minimum": 1})), ("end", json!({"type": "integer", "minimum": 1}))]
-            ),
-            object_schema(
-                [("action", json!({"const": "search_text"})), ("pattern", json!({"type": "string"}))],
-                ["action", "pattern"],
-                [("root", json!({"type": "string"}))]
-            ),
-            object_schema(
-                [("action", json!({"const": "list_files"}))],
-                ["action"],
-                [("root", json!({"type": "string"}))]
-            ),
-            object_schema(
-                [("action", json!({"const": "apply_patch"})), ("unified_diff", json!({"type": "string"}))],
-                ["action", "unified_diff"],
-                []
-            ),
-            object_schema([("action", json!({"const": "run_verifier"}))], ["action"], []),
-            object_schema([("action", json!({"const": "run_tests"}))], ["action"], []),
-            object_schema([("action", json!({"const": "run_typecheck"}))], ["action"], []),
-            object_schema([("action", json!({"const": "run_benchmark"}))], ["action"], []),
-            object_schema(
-                [("action", json!({"const": "finish"})), ("summary", json!({"type": "string"}))],
-                ["action", "summary"],
-                []
-            )
-        ]
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "action",
+            "path",
+            "start",
+            "end",
+            "pattern",
+            "root",
+            "unified_diff",
+            "summary"
+        ],
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": [
+                    "read_file",
+                    "search_text",
+                    "list_files",
+                    "apply_patch",
+                    "run_verifier",
+                    "run_tests",
+                    "run_typecheck",
+                    "run_benchmark",
+                    "finish"
+                ]
+            },
+            "path": { "type": ["string", "null"] },
+            "start": { "type": ["integer", "null"], "minimum": 1 },
+            "end": { "type": ["integer", "null"], "minimum": 1 },
+            "pattern": { "type": ["string", "null"] },
+            "root": { "type": ["string", "null"] },
+            "unified_diff": { "type": ["string", "null"] },
+            "summary": { "type": ["string", "null"] }
+        }
     })
 }
 
@@ -92,27 +96,6 @@ pub fn write_action_output_schema(path: &Path) -> Result<()> {
         PatchwrightError::Model(format!("failed to serialize action schema: {error}"))
     })?;
     fs::write(path, schema).map_err(PatchwrightError::from)
-}
-
-fn object_schema<const R: usize, const O: usize>(
-    required_properties: [(&str, Value); R],
-    required: [&str; R],
-    optional_properties: [(&str, Value); O],
-) -> Value {
-    let mut properties = serde_json::Map::new();
-    for (name, schema) in required_properties {
-        properties.insert(name.to_owned(), schema);
-    }
-    for (name, schema) in optional_properties {
-        properties.insert(name.to_owned(), schema);
-    }
-
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": required.to_vec(),
-        "properties": properties,
-    })
 }
 
 pub fn system_prompt() -> &'static str {
@@ -126,12 +109,13 @@ Core rules:
 - Apply the smallest patch that addresses the task and counterexamples.
 - After editing, run verification before finishing.
 - Finish only when verification has accepted the change.
+- Set fields that are not used by the selected action to null.
 
 Allowed action examples:
-{"action":"read_file","path":"src/lib.rs","start":1,"end":120}
-{"action":"apply_patch","unified_diff":"diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,3 @@\n pub fn add(a: i32, b: i32) -> i32 {\n-    a - b\n+    a + b\n }\n"}
-{"action":"run_verifier"}
-{"action":"finish","summary":"fixed the failing add test"}"#
+{"action":"read_file","path":"src/lib.rs","start":1,"end":120,"pattern":null,"root":null,"unified_diff":null,"summary":null}
+{"action":"apply_patch","path":null,"start":null,"end":null,"pattern":null,"root":null,"unified_diff":"diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,3 @@\n pub fn add(a: i32, b: i32) -> i32 {\n-    a - b\n+    a + b\n }\n","summary":null}
+{"action":"run_verifier","path":null,"start":null,"end":null,"pattern":null,"root":null,"unified_diff":null,"summary":null}
+{"action":"finish","path":null,"start":null,"end":null,"pattern":null,"root":null,"unified_diff":null,"summary":"fixed the failing add test"}"#
 }
 
 fn user_prompt(request: &ModelRequest) -> String {
@@ -268,6 +252,9 @@ fn optional_repo_path(value: &Value, field: &str) -> Result<Option<RepoPath>> {
     let Some(path) = value.get(field) else {
         return Ok(None);
     };
+    if path.is_null() {
+        return Ok(None);
+    }
     let path = path.as_str().ok_or_else(|| {
         PatchwrightError::Model(format!(
             "model action JSON field '{field}' must be a string"
@@ -315,6 +302,7 @@ fn relative_path_error(path: &str) -> PatchwrightError {
 fn optional_line_range(value: &Value) -> Result<Option<LineRange>> {
     match (value.get("start"), value.get("end")) {
         (None, None) => Ok(None),
+        (Some(start), Some(end)) if start.is_null() && end.is_null() => Ok(None),
         (Some(start), Some(end)) => {
             let start = line_number(start, "start")?;
             let end = line_number(end, "end")?;
