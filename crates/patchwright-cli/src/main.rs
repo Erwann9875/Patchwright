@@ -7,8 +7,8 @@ use patchwright_core::policy::Policy;
 use patchwright_core::traits::{Indexer, LanguageAdapter, ModelProvider, Verifier};
 use patchwright_core::types::{
     ArchitectureDesign, CommandSpec, Counterexample, DesignOption, DetectionScore, EvidenceRef,
-    FileImpact, FileQuery, ModelRequest, ModelResponse, PlanStep, RepoView, Risk, RunReport,
-    ScoredPath, TaskSpec, VerificationStatus, VerifierPlan,
+    FileImpact, FileQuery, ImplementationGraph, ModelRequest, ModelResponse, PlanStep, RepoPath,
+    RepoView, Risk, RunReport, ScoredPath, TaskSpec, VerificationStatus, VerifierPlan,
 };
 use patchwright_exec_local::{GitWorktreeSandbox, LocalExecution};
 use patchwright_index::{profile_project, BasicIndexer, ProjectProfile};
@@ -63,6 +63,7 @@ where
         "bench" if args.get(1).map(String::as_str) == Some("startup") => run_startup_bench(),
         "profile" => run_profile(&args),
         "design" => run_design(&args),
+        "implement" => run_implement(&args),
         "solve" => run_solve(&args),
         "verify" => run_verify(&args),
         other => Err(format!("unknown command: {other}")),
@@ -133,7 +134,22 @@ fn repo_paths_as_strings(paths: &[patchwright_core::types::RepoPath]) -> Vec<Str
 
 fn run_solve(args: &[String]) -> Result<(), String> {
     let options = solve_options(args)?;
-    let model = cli_model(&options)?;
+    let report = execute_solve(&options, None)?;
+    println!("{}", render_solve_report(&report));
+
+    Ok(())
+}
+
+fn run_implement(args: &[String]) -> Result<(), String> {
+    let (options, scope) = implement_options(args)?;
+    let report = execute_solve(&options, scope.as_ref())?;
+    println!("{}", render_solve_report(&report));
+
+    Ok(())
+}
+
+fn execute_solve(options: &SolveOptions, scope: Option<&StepScope>) -> Result<SolveReport, String> {
+    let model = cli_model(options)?;
 
     let sandbox = GitWorktreeSandbox::create(&options.repo).map_err(|error| error.to_string())?;
     let sandbox_repo = sandbox.root().to_path_buf();
@@ -148,7 +164,7 @@ fn run_solve(args: &[String]) -> Result<(), String> {
     let indexer = BasicIndexer::new(&sandbox_repo);
     let verifier = PlanVerifier;
     let policy = Policy::ProjectConfiguredCommands {
-        allowed_programs: options.allowed_programs,
+        allowed_programs: options.allowed_programs.clone(),
     };
     let mut agent = Agent::builder()
         .model(model)
@@ -165,16 +181,27 @@ fn run_solve(args: &[String]) -> Result<(), String> {
 
     let report = agent
         .solve(
-            TaskSpec::from_text(sandbox_repo.clone(), options.task)
+            TaskSpec::from_text(sandbox_repo.clone(), options.task.clone())
                 .with_require_patch(options.require_patch),
         )
         .map_err(|error| error.to_string())?;
     if report.status == SolveStatus::Accepted {
+        if let Some(scope) = scope {
+            let outside = out_of_scope_changed_files(&report, scope);
+            if !outside.is_empty() {
+                return Err(format!(
+                    "accepted patch changed files outside selected plan step: {}",
+                    outside
+                        .iter()
+                        .map(|path| path.0.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
         apply_sandbox_diff_to_source(&sandbox_repo, &options.repo)?;
     }
-    println!("{}", render_solve_report(&report));
-
-    Ok(())
+    Ok(report)
 }
 
 fn apply_sandbox_diff_to_source(sandbox_repo: &Path, source_repo: &Path) -> Result<(), String> {
@@ -595,6 +622,26 @@ struct SolveFlags {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct StepScope {
+    target_files: Vec<RepoPath>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImplementFlags {
+    repo: String,
+    from: String,
+    step: String,
+    dry_run: bool,
+    model_provider: Option<ModelProviderKind>,
+    model: Option<String>,
+    base_url: Option<String>,
+    api_key_env: Option<String>,
+    max_steps: Option<usize>,
+    info_only: bool,
+    allow_out_of_scope: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DesignOptions {
     repo: PathBuf,
     task: String,
@@ -664,6 +711,307 @@ fn solve_options(args: &[String]) -> Result<SolveOptions, String> {
         allowed_programs: config.policy.allowed_programs,
         rust: config.rust,
         verify_commands: config.verify.commands,
+    })
+}
+
+fn implement_options(args: &[String]) -> Result<(SolveOptions, Option<StepScope>), String> {
+    let flags = ImplementFlags::parse(args)?;
+    let repo = accessible_repo_path(&flags.repo)?;
+    let graph = load_implementation_graph(&repo, &flags.from)?;
+    let step = graph
+        .steps
+        .iter()
+        .find(|step| step.id == flags.step)
+        .ok_or_else(|| format!("plan step '{}' was not found", flags.step))?;
+    let task = implementation_task_text(step);
+
+    let mut solve_args = vec![
+        "solve".to_owned(),
+        "--repo".to_owned(),
+        flags.repo.clone(),
+        "--task".to_owned(),
+        task,
+    ];
+    append_optional_solve_flags(&mut solve_args, &flags);
+
+    let options = solve_options(&solve_args)?;
+    let scope = if flags.allow_out_of_scope || step.target_files.is_empty() {
+        None
+    } else {
+        Some(StepScope {
+            target_files: step.target_files.clone(),
+        })
+    };
+
+    Ok((options, scope))
+}
+
+fn append_optional_solve_flags(args: &mut Vec<String>, flags: &ImplementFlags) {
+    if flags.dry_run {
+        args.push("--dry-run".to_owned());
+    }
+    if flags.info_only {
+        args.push("--info-only".to_owned());
+    }
+    if let Some(provider) = &flags.model_provider {
+        args.push("--model-provider".to_owned());
+        args.push(model_provider_name(provider).to_owned());
+    }
+    if let Some(model) = &flags.model {
+        args.push("--model".to_owned());
+        args.push(model.clone());
+    }
+    if let Some(base_url) = &flags.base_url {
+        args.push("--base-url".to_owned());
+        args.push(base_url.clone());
+    }
+    if let Some(api_key_env) = &flags.api_key_env {
+        args.push("--api-key-env".to_owned());
+        args.push(api_key_env.clone());
+    }
+    if let Some(max_steps) = flags.max_steps {
+        args.push("--max-steps".to_owned());
+        args.push(max_steps.to_string());
+    }
+}
+
+fn load_implementation_graph(repo: &Path, from: &str) -> Result<ImplementationGraph, String> {
+    let path = resolve_plan_path(repo, from);
+    let content = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read plan {}: {error}", path.display()))?;
+
+    if content.trim_start().starts_with('{') {
+        return patchwright_model_contract::parse_implementation_graph_json(&content)
+            .map_err(|error| error.to_string());
+    }
+
+    parse_implementation_graph_markdown(&content)
+}
+
+fn resolve_plan_path(repo: &Path, from: &str) -> PathBuf {
+    let path = PathBuf::from(from);
+    if path.is_absolute() {
+        return path;
+    }
+
+    let repo_path = repo.join(&path);
+    if repo_path.exists() {
+        repo_path
+    } else {
+        path
+    }
+}
+
+fn parse_implementation_graph_markdown(content: &str) -> Result<ImplementationGraph, String> {
+    let mut steps = Vec::new();
+    let mut current: Option<PartialPlanStep> = None;
+
+    for line in content.lines() {
+        if let Some((id, title)) = parse_plan_step_heading(line) {
+            if let Some(step) = current.take() {
+                steps.push(step.finish());
+            }
+            current = Some(PartialPlanStep::new(id, title));
+            continue;
+        }
+
+        if let Some(step) = current.as_mut() {
+            step.push_line(line);
+        }
+    }
+
+    if let Some(step) = current {
+        steps.push(step.finish());
+    }
+
+    if steps.is_empty() {
+        return Err("implementation plan did not contain any steps".to_owned());
+    }
+
+    Ok(ImplementationGraph { steps })
+}
+
+fn parse_plan_step_heading(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("## ")?;
+    let (id, title) = rest.split_once(". ")?;
+    if id.trim().is_empty() || title.trim().is_empty() {
+        return None;
+    }
+    Some((id.trim().to_owned(), title.trim().to_owned()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlanList {
+    None,
+    TargetFiles,
+    AcceptanceCriteria,
+    VerificationCommands,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PartialPlanStep {
+    id: String,
+    title: String,
+    description: Vec<String>,
+    depends_on: Vec<String>,
+    target_files: Vec<RepoPath>,
+    acceptance_criteria: Vec<String>,
+    verification_commands: Vec<String>,
+    list: PlanList,
+}
+
+impl PartialPlanStep {
+    fn new(id: String, title: String) -> Self {
+        Self {
+            id,
+            title,
+            description: Vec::new(),
+            depends_on: Vec::new(),
+            target_files: Vec::new(),
+            acceptance_criteria: Vec::new(),
+            verification_commands: Vec::new(),
+            list: PlanList::None,
+        }
+    }
+
+    fn push_line(&mut self, line: &str) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        if let Some(depends_on) = trimmed.strip_prefix("Depends on:") {
+            self.depends_on = parse_depends_on(depends_on);
+            self.list = PlanList::None;
+            return;
+        }
+
+        self.list = match trimmed {
+            "Target files:" => PlanList::TargetFiles,
+            "Acceptance criteria:" => PlanList::AcceptanceCriteria,
+            "Verification commands:" => PlanList::VerificationCommands,
+            _ => self.list.clone(),
+        };
+        if matches!(
+            trimmed,
+            "Target files:" | "Acceptance criteria:" | "Verification commands:"
+        ) {
+            return;
+        }
+
+        if let Some(item) = parse_markdown_list_item(trimmed) {
+            match self.list {
+                PlanList::TargetFiles => self.target_files.push(RepoPath::new(item)),
+                PlanList::AcceptanceCriteria => self.acceptance_criteria.push(item),
+                PlanList::VerificationCommands => self.verification_commands.push(item),
+                PlanList::None => self.description.push(item),
+            }
+        } else if matches!(self.list, PlanList::None) {
+            self.description.push(trimmed.to_owned());
+        }
+    }
+
+    fn finish(self) -> PlanStep {
+        PlanStep {
+            id: self.id,
+            title: self.title,
+            description: self.description.join("\n"),
+            depends_on: self.depends_on,
+            target_files: self.target_files,
+            acceptance_criteria: self.acceptance_criteria,
+            verification_commands: self.verification_commands,
+        }
+    }
+}
+
+fn parse_depends_on(value: &str) -> Vec<String> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("none") {
+        return Vec::new();
+    }
+
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn parse_markdown_list_item(line: &str) -> Option<String> {
+    let item = line.strip_prefix("- ")?;
+    Some(item.trim().trim_matches('`').to_owned())
+}
+
+fn implementation_task_text(step: &PlanStep) -> String {
+    format!(
+        "Implement only this Patchwright plan step.\n\nStep ID: {}\nTitle: {}\nDescription:\n{}\n\nDepends on:\n{}\n\nTarget files:\n{}\n\nAcceptance criteria:\n{}\n\nVerification commands:\n{}\n\nRules:\n- Implement only this step.\n- Do not implement unrelated plan steps.\n- Keep changes within the target files unless a supporting file is strictly required for compilation.",
+        step.id,
+        step.title,
+        if step.description.trim().is_empty() {
+            "None."
+        } else {
+            step.description.trim()
+        },
+        if step.depends_on.is_empty() {
+            "none".to_owned()
+        } else {
+            step.depends_on.join(", ")
+        },
+        format_repo_path_lines(&step.target_files),
+        format_string_lines(&step.acceptance_criteria),
+        format_string_lines(&step.verification_commands)
+    )
+}
+
+fn format_repo_path_lines(paths: &[RepoPath]) -> String {
+    if paths.is_empty() {
+        return "- none".to_owned();
+    }
+
+    paths
+        .iter()
+        .map(|path| format!("- {}", path.0))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_string_lines(values: &[String]) -> String {
+    if values.is_empty() {
+        return "- none".to_owned();
+    }
+
+    values
+        .iter()
+        .map(|value| format!("- {value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn out_of_scope_changed_files(report: &SolveReport, scope: &StepScope) -> Vec<RepoPath> {
+    report
+        .attempts
+        .last()
+        .map(|attempt| {
+            attempt
+                .verification
+                .diff_summary
+                .changed_files
+                .iter()
+                .filter(|path| !path_matches_scope(path, &scope.target_files))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn path_matches_scope(path: &RepoPath, target_files: &[RepoPath]) -> bool {
+    target_files.iter().any(|target| {
+        path.0 == target.0
+            || target
+                .0
+                .strip_suffix('/')
+                .is_some_and(|prefix| path.0.starts_with(&format!("{prefix}/")))
     })
 }
 
@@ -746,6 +1094,57 @@ impl SolveFlags {
             api_key_env: optional_value_if_present(args, "--api-key-env")?,
             max_steps,
             info_only: has_flag(args, "--info-only"),
+        })
+    }
+}
+
+impl ImplementFlags {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        validate_implement_args(args)?;
+
+        let Some(repo) = value_after(args, "--repo") else {
+            return Err(
+                "implement requires --repo <path>, --from <plan>, and --step <id>".to_owned(),
+            );
+        };
+        let Some(from) = value_after(args, "--from") else {
+            return Err(
+                "implement requires --repo <path>, --from <plan>, and --step <id>".to_owned(),
+            );
+        };
+        let Some(step) = value_after(args, "--step") else {
+            return Err(
+                "implement requires --repo <path>, --from <plan>, and --step <id>".to_owned(),
+            );
+        };
+
+        let max_steps = match value_after(args, "--max-steps") {
+            Some(value) => value
+                .parse::<usize>()
+                .ok()
+                .filter(|value| *value > 0)
+                .map(Some)
+                .ok_or_else(|| {
+                    "implement requires --max-steps to be a positive integer".to_owned()
+                })?,
+            None if has_flag(args, "--max-steps") => {
+                return Err("implement requires --max-steps to be a positive integer".to_owned());
+            }
+            None => None,
+        };
+
+        Ok(Self {
+            repo,
+            from,
+            step,
+            dry_run: has_flag(args, "--dry-run"),
+            model_provider: optional_model_provider_for(args, "implement")?,
+            model: optional_value_if_present_for(args, "--model", "implement")?,
+            base_url: optional_value_if_present_for(args, "--base-url", "implement")?,
+            api_key_env: optional_value_if_present_for(args, "--api-key-env", "implement")?,
+            max_steps,
+            info_only: has_flag(args, "--info-only"),
+            allow_out_of_scope: has_flag(args, "--allow-out-of-scope"),
         })
     }
 }
@@ -856,6 +1255,43 @@ fn validate_solve_args(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_implement_args(args: &[String]) -> Result<(), String> {
+    for arg in args.iter().skip(1) {
+        if arg == "--api-key" || arg.starts_with("--api-key=") {
+            return Err("raw API keys are not accepted; use --api-key-env <name>".to_owned());
+        }
+    }
+
+    let mut index = 1;
+    while index < args.len() {
+        let arg = &args[index];
+        if !arg.starts_with("--") {
+            return Err(format!("unexpected implement argument: {arg}"));
+        }
+
+        if is_implement_value_flag(arg) {
+            index += if args
+                .get(index + 1)
+                .is_some_and(|value| !value.starts_with("--"))
+            {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+
+        if is_implement_bool_flag(arg) {
+            index += 1;
+            continue;
+        }
+
+        return Err(format!("unknown implement flag: {arg}"));
+    }
+
+    Ok(())
+}
+
 fn validate_design_args(args: &[String]) -> Result<(), String> {
     for arg in args.iter().skip(1) {
         if arg == "--api-key" || arg.starts_with("--api-key=") {
@@ -908,6 +1344,24 @@ fn is_solve_value_flag(arg: &str) -> bool {
 
 fn is_solve_bool_flag(arg: &str) -> bool {
     matches!(arg, "--dry-run" | "--info-only")
+}
+
+fn is_implement_value_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--repo"
+            | "--from"
+            | "--step"
+            | "--model-provider"
+            | "--model"
+            | "--base-url"
+            | "--api-key-env"
+            | "--max-steps"
+    )
+}
+
+fn is_implement_bool_flag(arg: &str) -> bool {
+    matches!(arg, "--dry-run" | "--info-only" | "--allow-out-of-scope")
 }
 
 fn is_design_value_flag(arg: &str) -> bool {
@@ -1435,7 +1889,7 @@ fn accessible_repo_path(path: &str) -> Result<PathBuf, String> {
 
 fn print_help() {
     println!(
-        "patchwright\n\nUSAGE:\n    patchwright --version\n    patchwright status\n    patchwright auth login [--repo <path>]\n    patchwright auth check [--repo <path>]\n    patchwright config check [--repo <path>]\n    patchwright bench startup\n    patchwright profile [--repo <path>]\n    patchwright design --repo <path> --task <text> [--dry-run] [--model-provider codex-cli|openai-compatible] [--model <name>] [--base-url <url>] [--api-key-env <name>]\n    patchwright solve --repo <path> --task <text> [--dry-run] [--model-provider codex-cli|openai-compatible] [--model <name>] [--base-url <url>] [--api-key-env <name>] [--max-steps <n>] [--info-only]\n    patchwright verify --repo <path>"
+        "patchwright\n\nUSAGE:\n    patchwright --version\n    patchwright status\n    patchwright auth login [--repo <path>]\n    patchwright auth check [--repo <path>]\n    patchwright config check [--repo <path>]\n    patchwright bench startup\n    patchwright profile [--repo <path>]\n    patchwright design --repo <path> --task <text> [--dry-run] [--model-provider codex-cli|openai-compatible] [--model <name>] [--base-url <url>] [--api-key-env <name>]\n    patchwright implement --repo <path> --from <plan> --step <id> [--dry-run] [--model-provider codex-cli|openai-compatible] [--model <name>] [--base-url <url>] [--api-key-env <name>] [--max-steps <n>] [--info-only] [--allow-out-of-scope]\n    patchwright solve --repo <path> --task <text> [--dry-run] [--model-provider codex-cli|openai-compatible] [--model <name>] [--base-url <url>] [--api-key-env <name>] [--max-steps <n>] [--info-only]\n    patchwright verify --repo <path>"
     );
 }
 
@@ -2200,6 +2654,106 @@ mod tests {
     }
 
     #[test]
+    fn implement_options_load_selected_plan_step_as_scoped_task() {
+        let repo = TempRepo::new("cli-implement-options");
+        repo.write(
+            "Cargo.toml",
+            "[package]\nname = \"cli_implement_options\"\n",
+        );
+        repo.write("src/lib.rs", "pub fn ok() {}\n");
+        repo.write(
+            "docs/patchwright/plans/feature.md",
+            implementation_graph_markdown(),
+        );
+
+        let (options, scope) = super::implement_options(&[
+            "implement".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+            "--from".to_owned(),
+            "docs/patchwright/plans/feature.md".to_owned(),
+            "--step".to_owned(),
+            "step-1".to_owned(),
+            "--dry-run".to_owned(),
+        ])
+        .unwrap();
+
+        assert!(options.task.contains("Step ID: step-1"));
+        assert!(options.task.contains("Title: Add domain type"));
+        assert!(!options.task.contains("Wire API"));
+        assert!(options.require_patch);
+        assert_eq!(
+            scope.unwrap().target_files,
+            vec![RepoPath::new("src/domain.rs")]
+        );
+    }
+
+    #[test]
+    fn implement_command_can_run_info_only_dry_run_from_plan() {
+        let repo = TempRepo::new("cli-implement-dry-run");
+        repo.write(
+            "Cargo.toml",
+            "[package]\nname = \"cli_implement_dry_run\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        repo.write("src/lib.rs", "pub fn ok() {}\n");
+        repo.write(
+            "docs/patchwright/plans/feature.md",
+            implementation_graph_markdown(),
+        );
+        repo.commit_all("seed implementation plan");
+
+        let result = run([
+            "implement".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+            "--from".to_owned(),
+            "docs/patchwright/plans/feature.md".to_owned(),
+            "--step".to_owned(),
+            "step-1".to_owned(),
+            "--dry-run".to_owned(),
+            "--info-only".to_owned(),
+        ]);
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn implement_scope_detects_changed_files_outside_selected_step() {
+        let report = SolveReport {
+            status: SolveStatus::Accepted,
+            summary: "accepted".to_owned(),
+            attempts: vec![Attempt {
+                patch_id: None,
+                verification: VerificationReport {
+                    status: VerificationStatus::Accepted,
+                    checks: Vec::new(),
+                    counterexamples: Vec::new(),
+                    diff_summary: DiffSummary {
+                        changed_files: vec![
+                            RepoPath::new("src/domain.rs"),
+                            RepoPath::new("src/api.rs"),
+                        ],
+                        inserted_lines: 2,
+                        deleted_lines: 0,
+                    },
+                    policy_events: Vec::new(),
+                },
+            }],
+            observations: Vec::new(),
+            counterexamples: Vec::new(),
+        };
+
+        let scope = super::StepScope {
+            target_files: vec![RepoPath::new("src/domain.rs")],
+        };
+
+        assert_eq!(
+            super::out_of_scope_changed_files(&report, &scope),
+            vec![RepoPath::new("src/api.rs")]
+        );
+    }
+
+    #[test]
     fn profile_command_runs_without_model_call() {
         let repo = TempRepo::new("cli-profile");
         repo.write("Cargo.toml", "[package]\nname = \"cli_profile\"\n");
@@ -2234,6 +2788,41 @@ mod tests {
 
     fn toml_escape_path(path: &Path) -> String {
         path.to_string_lossy().replace('\\', "\\\\")
+    }
+
+    fn implementation_graph_markdown() -> &'static str {
+        r#"# Implementation Graph
+
+## step-1. Add domain type
+
+Introduce the smallest domain model first.
+
+Depends on: none
+
+Target files:
+- `src/domain.rs`
+
+Acceptance criteria:
+- Domain type compiles.
+
+Verification commands:
+- cargo test domain
+
+## step-2. Wire API
+
+Use the domain type in the API boundary.
+
+Depends on: step-1
+
+Target files:
+- `src/api.rs`
+
+Acceptance criteria:
+- API tests pass.
+
+Verification commands:
+- cargo test api
+"#
     }
 
     #[cfg(windows)]

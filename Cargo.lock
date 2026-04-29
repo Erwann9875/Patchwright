@@ -267,6 +267,7 @@ dependencies = [
  "patchwright-index",
  "patchwright-lang-rust",
  "patchwright-model-codex-cli",
+ "patchwright-model-contract",
  "patchwright-model-openai",
  "patchwright-test-support",
  "patchwright-verify",

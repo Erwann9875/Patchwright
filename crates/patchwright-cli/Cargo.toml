@@ -15,6 +15,7 @@ patchwright-core = { path = "../patchwright-core" }
 patchwright-exec-local = { path = "../patchwright-exec-local" }
 patchwright-index = { path = "../patchwright-index" }
 patchwright-lang-rust = { path = "../patchwright-lang-rust" }
+patchwright-model-contract = { path = "../patchwright-model-contract" }
 patchwright-model-codex-cli = { path = "../patchwright-model-codex-cli" }
 patchwright-model-openai = { path = "../patchwright-model-openai" }
 patchwright-verify = { path = "../patchwright-verify" }
