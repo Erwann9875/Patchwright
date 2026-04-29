@@ -1,10 +1,15 @@
 # Patchwright
 
-Patchwright is a local-first Rust foundation for a software-engineering coding agent. The model proposes candidate actions and patches; compilers, tests, linters, type checkers, benchmarks, policies, and reviewers decide what is true.
+Patchwright is a local-first Rust foundation for a software-engineering coding
+agent. The model proposes candidate actions and patches; compilers, tests,
+linters, type checkers, benchmarks, policies, and reviewers decide what is true.
 
-The first build focuses on a language-agnostic core, a Rust adapter, local execution, Codex CLI / OpenAI-compatible model access, and strict verification.
+The first build focuses on a language-agnostic core, a Rust adapter, local
+execution, Codex CLI / OpenAI-compatible model access, and strict verification.
 
-`solve` and `verify` execute inside temporary git worktrees so rejected attempts and build artifacts do not mutate the source checkout. The source repo must be clean before sandboxed execution.
+`solve` and `verify` execute inside temporary git worktrees so rejected attempts
+and build artifacts do not mutate the source checkout. The source repo must be
+clean before sandboxed execution.
 
 ## Development
 
@@ -42,7 +47,17 @@ On Windows PowerShell, use:
 powershell -ExecutionPolicy Bypass -File scripts/demo-add-wrong-operator.ps1
 ```
 
-The demo copies `fixtures/rust/add_wrong_operator` to a temporary directory outside the Patchwright checkout, initializes that copy as an independent git repository, commits the broken fixture, runs the failing test, asks Patchwright to solve it through the Codex CLI provider, and then runs the test again. The fixture template in this repository is not modified.
+The demo:
+
+- copies `fixtures/rust/add_wrong_operator` to a temporary directory outside the
+  Patchwright checkout
+- initializes that copy as an independent git repository
+- commits the broken fixture
+- runs the failing test
+- asks Patchwright to solve it through the Codex CLI provider
+- runs the test again
+
+The fixture template in this repository is not modified.
 
 ## Project Config
 
@@ -82,4 +97,7 @@ test = true
 clippy = false
 ```
 
-The default real provider is `codex-cli`, which uses the user's existing Codex / ChatGPT login. OpenAI-compatible API-key access remains available by setting `provider = "openai-compatible"` or by passing OpenAI-specific CLI flags. No API key is accepted as a raw CLI argument; use `api_key_env`.
+The default real provider is `codex-cli`, which uses the user's existing Codex /
+ChatGPT login. OpenAI-compatible API-key access remains available by setting
+`provider = "openai-compatible"` or by passing OpenAI-specific CLI flags. No API
+key is accepted as a raw CLI argument; use `api_key_env`.

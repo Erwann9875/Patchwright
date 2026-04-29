@@ -45,8 +45,24 @@ if ($LASTEXITCODE -eq 0) {
 Write-Host ""
 Write-Host "Running Patchwright:"
 $Task = Get-Content -Raw (Join-Path $Tmp "TASK.md")
-Invoke-Checked "cargo" @("run", "-p", "patchwright-cli", "--", "solve", "--repo", $Tmp, "--task", $Task, "--model-provider", "codex-cli", "--max-steps", "12")
+$SolveArgs = @(
+    "run",
+    "-p",
+    "patchwright-cli",
+    "--",
+    "solve",
+    "--repo",
+    $Tmp,
+    "--task",
+    $Task,
+    "--model-provider",
+    "codex-cli",
+    "--max-steps",
+    "12"
+)
+Invoke-Checked "cargo" $SolveArgs
 
 Write-Host ""
 Write-Host "After Patchwright:"
-Invoke-Checked "cargo" @("test", "--manifest-path", (Join-Path $Tmp "Cargo.toml"))
+$TestArgs = @("test", "--manifest-path", (Join-Path $Tmp "Cargo.toml"))
+Invoke-Checked "cargo" $TestArgs
