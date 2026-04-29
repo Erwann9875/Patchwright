@@ -30,5 +30,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "patchwright-lang-rust"
+version = "0.1.0"
+dependencies = [
+ "patchwright-core",
+ "patchwright-index",
+ "patchwright-test-support",
+]
+
+[[package]]
 name = "patchwright-test-support"
 version = "0.1.0"

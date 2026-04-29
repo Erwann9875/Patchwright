@@ -5,6 +5,7 @@ members = [
     "crates/patchwright-test-support",
     "crates/patchwright-exec-local",
     "crates/patchwright-index",
+    "crates/patchwright-lang-rust",
 ]
 resolver = "2"
 
