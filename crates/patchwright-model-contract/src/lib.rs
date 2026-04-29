@@ -98,6 +98,183 @@ pub fn write_action_output_schema(path: &Path) -> Result<()> {
     fs::write(path, schema).map_err(PatchwrightError::from)
 }
 
+pub fn architecture_design_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "title",
+            "goal",
+            "current_architecture",
+            "assumptions",
+            "non_goals",
+            "options",
+            "recommendation",
+            "file_impact",
+            "implementation_plan",
+            "test_strategy",
+            "risks",
+            "open_questions",
+            "acceptance_criteria"
+        ],
+        "properties": {
+            "title": string_schema(),
+            "goal": string_schema(),
+            "current_architecture": array_of(architecture_finding_schema()),
+            "assumptions": string_array_schema(),
+            "non_goals": string_array_schema(),
+            "options": array_of(design_option_schema()),
+            "recommendation": recommended_design_schema(),
+            "file_impact": array_of(file_impact_schema()),
+            "implementation_plan": array_of(plan_step_schema()),
+            "test_strategy": test_strategy_schema(),
+            "migration_plan": nullable_string_schema(),
+            "rollback_plan": nullable_string_schema(),
+            "risks": array_of(risk_schema()),
+            "open_questions": string_array_schema(),
+            "acceptance_criteria": string_array_schema()
+        }
+    })
+}
+
+fn architecture_finding_schema() -> Value {
+    object_with_required(
+        ["summary", "evidence"],
+        json!({
+            "summary": string_schema(),
+            "evidence": evidence_array_schema()
+        }),
+    )
+}
+
+fn design_option_schema() -> Value {
+    object_with_required(
+        ["name", "summary", "pros", "cons", "evidence"],
+        json!({
+            "name": string_schema(),
+            "summary": string_schema(),
+            "pros": string_array_schema(),
+            "cons": string_array_schema(),
+            "evidence": evidence_array_schema()
+        }),
+    )
+}
+
+fn recommended_design_schema() -> Value {
+    object_with_required(
+        ["option_name", "rationale", "evidence"],
+        json!({
+            "option_name": string_schema(),
+            "rationale": string_schema(),
+            "evidence": evidence_array_schema()
+        }),
+    )
+}
+
+fn file_impact_schema() -> Value {
+    object_with_required(
+        ["path", "change_summary", "risk", "evidence"],
+        json!({
+            "path": string_schema(),
+            "change_summary": string_schema(),
+            "risk": nullable_string_schema(),
+            "evidence": evidence_array_schema()
+        }),
+    )
+}
+
+fn plan_step_schema() -> Value {
+    object_with_required(
+        [
+            "id",
+            "title",
+            "description",
+            "depends_on",
+            "target_files",
+            "acceptance_criteria",
+            "verification_commands",
+        ],
+        json!({
+            "id": string_schema(),
+            "title": string_schema(),
+            "description": string_schema(),
+            "depends_on": string_array_schema(),
+            "target_files": string_array_schema(),
+            "acceptance_criteria": string_array_schema(),
+            "verification_commands": string_array_schema()
+        }),
+    )
+}
+
+fn test_strategy_schema() -> Value {
+    object_with_required(
+        ["unit", "integration", "end_to_end", "manual", "commands"],
+        json!({
+            "unit": string_array_schema(),
+            "integration": string_array_schema(),
+            "end_to_end": string_array_schema(),
+            "manual": string_array_schema(),
+            "commands": string_array_schema()
+        }),
+    )
+}
+
+fn risk_schema() -> Value {
+    object_with_required(
+        ["title", "impact", "mitigation", "evidence"],
+        json!({
+            "title": string_schema(),
+            "impact": string_schema(),
+            "mitigation": string_schema(),
+            "evidence": evidence_array_schema()
+        }),
+    )
+}
+
+fn evidence_array_schema() -> Value {
+    array_of(object_with_required(
+        ["path", "start_line", "end_line", "reason"],
+        json!({
+            "path": string_schema(),
+            "start_line": nullable_integer_schema(),
+            "end_line": nullable_integer_schema(),
+            "reason": string_schema()
+        }),
+    ))
+}
+
+fn object_with_required<const N: usize>(required: [&str; N], properties: Value) -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": required.to_vec(),
+        "properties": properties
+    })
+}
+
+fn array_of(items: Value) -> Value {
+    json!({
+        "type": "array",
+        "items": items
+    })
+}
+
+fn string_array_schema() -> Value {
+    array_of(string_schema())
+}
+
+fn string_schema() -> Value {
+    json!({ "type": "string" })
+}
+
+fn nullable_string_schema() -> Value {
+    json!({ "type": ["string", "null"] })
+}
+
+fn nullable_integer_schema() -> Value {
+    json!({ "type": ["integer", "null"], "minimum": 1 })
+}
+
 pub fn system_prompt() -> &'static str {
     r#"Return only one JSON action. Do not include Markdown fences, commentary, or multiple actions.
 

@@ -4,7 +4,8 @@ use patchwright_core::types::{
     ScoredPath, SearchQuery, TaskSpec,
 };
 use patchwright_model_contract::{
-    action_output_schema, build_openai_prompt, build_prompt, parse_action_json, render_exec_prompt,
+    action_output_schema, architecture_design_schema, build_openai_prompt, build_prompt,
+    parse_action_json, render_exec_prompt,
 };
 use std::path::PathBuf;
 
@@ -144,6 +145,44 @@ fn schema_contains_supported_actions_without_revert() {
         assert!(schema.contains(action));
     }
     assert!(!schema.contains("revert_attempt"));
+}
+
+#[test]
+fn architecture_design_schema_requires_professional_design_sections() {
+    let schema = architecture_design_schema();
+
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["additionalProperties"], false);
+
+    let required = schema["required"]
+        .as_array()
+        .expect("required fields should be an array")
+        .iter()
+        .map(|value| value.as_str().expect("required field should be string"))
+        .collect::<Vec<_>>();
+
+    for field in [
+        "title",
+        "goal",
+        "current_architecture",
+        "assumptions",
+        "non_goals",
+        "options",
+        "recommendation",
+        "file_impact",
+        "implementation_plan",
+        "test_strategy",
+        "risks",
+        "open_questions",
+        "acceptance_criteria",
+    ] {
+        assert!(required.contains(&field), "missing required field {field}");
+    }
+
+    assert!(schema.to_string().contains("evidence"));
+    assert!(schema.to_string().contains("path"));
+    assert!(schema.to_string().contains("start_line"));
+    assert!(schema.to_string().contains("verification_commands"));
 }
 
 #[test]
