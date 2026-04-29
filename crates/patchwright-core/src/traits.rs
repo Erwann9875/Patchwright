@@ -2,14 +2,20 @@ use crate::action::Observation;
 use crate::error::Result;
 use crate::policy::Policy;
 use crate::types::{
-    CommandSpec, ContextPack, Counterexample, DetectionScore, DiffSummary, FileQuery, FileSlice,
-    LineRange, ModelRequest, ModelResponse, Patch, PatchId, RepoPath, RepoView, RunReport,
-    ScoredPath, SearchQuery, SearchResults, SnapshotId, Symbol, TaskSpec, VerificationReport,
-    VerifierPlan,
+    ArchitectureDesign, CommandSpec, ContextPack, Counterexample, DetectionScore, DiffSummary,
+    FileQuery, FileSlice, LineRange, ModelRequest, ModelResponse, Patch, PatchId, RepoPath,
+    RepoView, RunReport, ScoredPath, SearchQuery, SearchResults, SnapshotId, Symbol, TaskSpec,
+    VerificationReport, VerifierPlan,
 };
 
 pub trait ModelProvider {
     fn propose_action(&mut self, request: ModelRequest) -> Result<ModelResponse>;
+
+    fn propose_design(&mut self, _request: ModelRequest) -> Result<ArchitectureDesign> {
+        Err(crate::error::PatchwrightError::Model(
+            "model provider does not support architecture design".to_owned(),
+        ))
+    }
 }
 
 pub trait ExecutionBackend {

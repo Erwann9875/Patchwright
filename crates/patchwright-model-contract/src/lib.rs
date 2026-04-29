@@ -2,6 +2,7 @@
 
 use patchwright_core::action::Action;
 use patchwright_core::error::{PatchwrightError, Result};
+use patchwright_core::types::ArchitectureDesign;
 use patchwright_core::types::{
     ContextPack, FileQuery, LineRange, ModelRequest, Patch, RepoPath, SearchQuery,
 };
@@ -51,6 +52,14 @@ pub fn render_exec_prompt(request: &ModelRequest) -> String {
     )
 }
 
+pub fn render_design_exec_prompt(request: &ModelRequest) -> String {
+    format!(
+        "{}\n\nYou are running as a model provider transport. Do not edit files, run commands, or claim success. Return one final JSON object that matches the supplied architecture design schema.\n\n{}",
+        design_system_prompt(),
+        user_prompt(request)
+    )
+}
+
 pub fn action_output_schema() -> Value {
     json!({
         "type": "object",
@@ -96,6 +105,31 @@ pub fn write_action_output_schema(path: &Path) -> Result<()> {
         PatchwrightError::Model(format!("failed to serialize action schema: {error}"))
     })?;
     fs::write(path, schema).map_err(PatchwrightError::from)
+}
+
+pub fn write_architecture_design_schema(path: &Path) -> Result<()> {
+    let schema = serde_json::to_vec_pretty(&architecture_design_schema()).map_err(|error| {
+        PatchwrightError::Model(format!(
+            "failed to serialize architecture design schema: {error}"
+        ))
+    })?;
+    fs::write(path, schema).map_err(PatchwrightError::from)
+}
+
+pub fn parse_architecture_design_json(content: &str) -> Result<ArchitectureDesign> {
+    serde_json::from_str(content).map_err(|error| {
+        PatchwrightError::Model(format!(
+            "model architecture design content was not valid JSON: {error}"
+        ))
+    })
+}
+
+pub fn design_system_prompt() -> &'static str {
+    r#"Create a senior-engineer architecture design for the requested task.
+
+Do not edit files. Do not claim implementation is complete. Every architecture claim should cite concrete file evidence when available.
+
+The design must compare viable options, recommend one, identify affected files, define an implementation sequence, and include test, migration, rollback, risk, open-question, and acceptance-criteria sections."#
 }
 
 pub fn architecture_design_schema() -> Value {

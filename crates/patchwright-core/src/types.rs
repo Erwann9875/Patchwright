@@ -1,8 +1,9 @@
 use crate::action::Observation;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RepoPath(pub String);
 
 impl RepoPath {
@@ -117,7 +118,7 @@ impl TaskSpec {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskMode {
     Design,
     Plan,
@@ -127,7 +128,7 @@ pub enum TaskMode {
     InfoOnly,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArchitectureDesign {
     pub title: String,
     pub goal: String,
@@ -146,13 +147,13 @@ pub struct ArchitectureDesign {
     pub acceptance_criteria: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArchitectureFinding {
     pub summary: String,
     pub evidence: Vec<EvidenceRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesignOption {
     pub name: String,
     pub summary: String,
@@ -161,14 +162,14 @@ pub struct DesignOption {
     pub evidence: Vec<EvidenceRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecommendedDesign {
     pub option_name: String,
     pub rationale: String,
     pub evidence: Vec<EvidenceRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileImpact {
     pub path: RepoPath,
     pub change_summary: String,
@@ -176,7 +177,7 @@ pub struct FileImpact {
     pub evidence: Vec<EvidenceRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanStep {
     pub id: String,
     pub title: String,
@@ -187,7 +188,7 @@ pub struct PlanStep {
     pub verification_commands: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestStrategy {
     pub unit: Vec<String>,
     pub integration: Vec<String>,
@@ -196,7 +197,7 @@ pub struct TestStrategy {
     pub commands: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Risk {
     pub title: String,
     pub impact: String,
@@ -204,7 +205,7 @@ pub struct Risk {
     pub evidence: Vec<EvidenceRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceRef {
     pub path: RepoPath,
     pub start_line: Option<usize>,

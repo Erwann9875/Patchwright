@@ -4,9 +4,10 @@ use patchwright_config::{ModelProviderKind, PatchwrightConfig, RustConfig};
 use patchwright_core::agent::{Agent, SolveReport, SolveStatus};
 use patchwright_core::error::Result as PatchwrightResult;
 use patchwright_core::policy::Policy;
-use patchwright_core::traits::{LanguageAdapter, ModelProvider, Verifier};
+use patchwright_core::traits::{Indexer, LanguageAdapter, ModelProvider, Verifier};
 use patchwright_core::types::{
-    ModelRequest, ModelResponse, RepoView, TaskSpec, VerificationStatus,
+    ArchitectureDesign, DesignOption, EvidenceRef, FileImpact, ModelRequest, ModelResponse,
+    PlanStep, RepoView, Risk, TaskSpec, VerificationStatus,
 };
 use patchwright_exec_local::{GitWorktreeSandbox, LocalExecution};
 use patchwright_index::BasicIndexer;
@@ -19,6 +20,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() -> ExitCode {
     match run(env::args().skip(1)) {
@@ -58,6 +60,7 @@ where
         "auth" if args.get(1).map(String::as_str) == Some("login") => run_auth_login(&args),
         "auth" if args.get(1).map(String::as_str) == Some("check") => run_auth_check(&args),
         "bench" if args.get(1).map(String::as_str) == Some("startup") => run_startup_bench(),
+        "design" => run_design(&args),
         "solve" => run_solve(&args),
         "verify" => run_verify(&args),
         other => Err(format!("unknown command: {other}")),
@@ -165,6 +168,332 @@ fn apply_sandbox_diff_to_source(sandbox_repo: &Path, source_repo: &Path) -> Resu
     Ok(())
 }
 
+fn run_design(args: &[String]) -> Result<(), String> {
+    let options = design_options(args)?;
+    let mut model = design_model(&options)?;
+    let indexer = BasicIndexer::new(&options.repo);
+    let task = TaskSpec::from_text(options.repo.clone(), options.task.clone());
+    let context = indexer
+        .context_pack(&task, &[], &[])
+        .map_err(|error| error.to_string())?;
+    let design = model
+        .propose_design(ModelRequest {
+            task,
+            observations: Vec::new(),
+            counterexamples: Vec::new(),
+            context: Some(context),
+        })
+        .map_err(|error| error.to_string())?;
+    let path = write_design_document(&options.repo, &options.task, &design)?;
+
+    println!("design written: {}", path.display());
+
+    Ok(())
+}
+
+fn write_design_document(
+    repo: &Path,
+    task: &str,
+    design: &ArchitectureDesign,
+) -> Result<PathBuf, String> {
+    let plans_dir = repo.join("docs").join("patchwright").join("plans");
+    fs::create_dir_all(&plans_dir).map_err(|error| error.to_string())?;
+    let path = plans_dir.join(format!(
+        "{}-{}.md",
+        current_date_string(),
+        slugify_task(task)
+    ));
+    fs::write(&path, render_architecture_design_markdown(design))
+        .map_err(|error| error.to_string())?;
+    Ok(path)
+}
+
+fn render_architecture_design_markdown(design: &ArchitectureDesign) -> String {
+    let mut output = String::new();
+
+    output.push_str(&format!("# {}\n\n", design.title));
+    push_section(&mut output, "Goal", &design.goal);
+    push_findings(
+        &mut output,
+        "Current Architecture",
+        &design.current_architecture,
+    );
+    push_inspected_files(&mut output, design);
+    push_list(&mut output, "Assumptions", &design.assumptions);
+    push_list(&mut output, "Non-goals", &design.non_goals);
+    push_options(&mut output, &design.options);
+    push_recommendation(&mut output, design);
+    push_file_impact(&mut output, &design.file_impact);
+    push_plan_steps(
+        &mut output,
+        "Implementation Plan",
+        &design.implementation_plan,
+    );
+    push_test_strategy(&mut output, design);
+    push_optional_section(
+        &mut output,
+        "Migration Plan",
+        design.migration_plan.as_deref(),
+    );
+    push_optional_section(
+        &mut output,
+        "Rollback Plan",
+        design.rollback_plan.as_deref(),
+    );
+    push_risks(&mut output, &design.risks);
+    push_list(&mut output, "Open Questions", &design.open_questions);
+    push_list(
+        &mut output,
+        "Acceptance Criteria",
+        &design.acceptance_criteria,
+    );
+
+    output
+}
+
+fn push_section(output: &mut String, heading: &str, content: &str) {
+    output.push_str(&format!("## {heading}\n\n{}\n\n", blank_if_empty(content)));
+}
+
+fn push_optional_section(output: &mut String, heading: &str, content: Option<&str>) {
+    push_section(output, heading, content.unwrap_or("None."));
+}
+
+fn push_list(output: &mut String, heading: &str, items: &[String]) {
+    output.push_str(&format!("## {heading}\n\n"));
+    if items.is_empty() {
+        output.push_str("- None.\n\n");
+        return;
+    }
+    for item in items {
+        output.push_str(&format!("- {}\n", blank_if_empty(item)));
+    }
+    output.push('\n');
+}
+
+fn push_findings(
+    output: &mut String,
+    heading: &str,
+    findings: &[patchwright_core::types::ArchitectureFinding],
+) {
+    output.push_str(&format!("## {heading}\n\n"));
+    if findings.is_empty() {
+        output.push_str("- None.\n\n");
+        return;
+    }
+    for finding in findings {
+        output.push_str(&format!("- {}\n", blank_if_empty(&finding.summary)));
+        push_evidence(output, &finding.evidence);
+    }
+    output.push('\n');
+}
+
+fn push_inspected_files(output: &mut String, design: &ArchitectureDesign) {
+    output.push_str("## Relevant Files Inspected\n\n");
+    let mut files = Vec::new();
+    collect_evidence_paths(&mut files, &design.recommendation.evidence);
+    for finding in &design.current_architecture {
+        collect_evidence_paths(&mut files, &finding.evidence);
+    }
+    for option in &design.options {
+        collect_evidence_paths(&mut files, &option.evidence);
+    }
+    for impact in &design.file_impact {
+        if !files.contains(&impact.path.0) {
+            files.push(impact.path.0.clone());
+        }
+        collect_evidence_paths(&mut files, &impact.evidence);
+    }
+    for risk in &design.risks {
+        collect_evidence_paths(&mut files, &risk.evidence);
+    }
+
+    if files.is_empty() {
+        output.push_str("- None.\n\n");
+        return;
+    }
+    for file in files {
+        output.push_str(&format!("- `{file}`\n"));
+    }
+    output.push('\n');
+}
+
+fn collect_evidence_paths(files: &mut Vec<String>, evidence: &[EvidenceRef]) {
+    for item in evidence {
+        if !files.contains(&item.path.0) {
+            files.push(item.path.0.clone());
+        }
+    }
+}
+
+fn push_options(output: &mut String, options: &[DesignOption]) {
+    output.push_str("## Design Options\n\n");
+    if options.is_empty() {
+        output.push_str("- None.\n\n");
+        return;
+    }
+    for option in options {
+        output.push_str(&format!("### {}\n\n{}\n\n", option.name, option.summary));
+        push_list(output, "Pros", &option.pros);
+        push_list(output, "Cons", &option.cons);
+        push_evidence(output, &option.evidence);
+        output.push('\n');
+    }
+}
+
+fn push_recommendation(output: &mut String, design: &ArchitectureDesign) {
+    output.push_str("## Recommended Design\n\n");
+    output.push_str(&format!(
+        "**{}**\n\n{}\n",
+        design.recommendation.option_name, design.recommendation.rationale
+    ));
+    push_evidence(output, &design.recommendation.evidence);
+    output.push('\n');
+}
+
+fn push_file_impact(output: &mut String, impacts: &[FileImpact]) {
+    output.push_str("## File Impact\n\n");
+    if impacts.is_empty() {
+        output.push_str("- None.\n\n");
+        return;
+    }
+    for impact in impacts {
+        output.push_str(&format!("- `{}`: {}", impact.path.0, impact.change_summary));
+        if let Some(risk) = &impact.risk {
+            output.push_str(&format!(" Risk: {risk}."));
+        }
+        output.push('\n');
+        push_evidence(output, &impact.evidence);
+    }
+    output.push('\n');
+}
+
+fn push_plan_steps(output: &mut String, heading: &str, steps: &[PlanStep]) {
+    output.push_str(&format!("## {heading}\n\n"));
+    if steps.is_empty() {
+        output.push_str("- None.\n\n");
+        return;
+    }
+    for step in steps {
+        output.push_str(&format!(
+            "### {}. {}\n\n{}\n\n",
+            step.id, step.title, step.description
+        ));
+        push_list(output, "Depends On", &step.depends_on);
+        let target_files = step
+            .target_files
+            .iter()
+            .map(|path| path.0.clone())
+            .collect::<Vec<_>>();
+        push_list(output, "Target Files", &target_files);
+        push_list(
+            output,
+            "Step Acceptance Criteria",
+            &step.acceptance_criteria,
+        );
+        push_list(output, "Verification Commands", &step.verification_commands);
+    }
+}
+
+fn push_test_strategy(output: &mut String, design: &ArchitectureDesign) {
+    output.push_str("## Test Strategy\n\n");
+    push_list(output, "Unit", &design.test_strategy.unit);
+    push_list(output, "Integration", &design.test_strategy.integration);
+    push_list(output, "End To End", &design.test_strategy.end_to_end);
+    push_list(output, "Manual", &design.test_strategy.manual);
+    push_list(output, "Commands", &design.test_strategy.commands);
+}
+
+fn push_risks(output: &mut String, risks: &[Risk]) {
+    output.push_str("## Risks\n\n");
+    if risks.is_empty() {
+        output.push_str("- None.\n\n");
+        return;
+    }
+    for risk in risks {
+        output.push_str(&format!(
+            "- **{}**: {} Mitigation: {}\n",
+            risk.title, risk.impact, risk.mitigation
+        ));
+        push_evidence(output, &risk.evidence);
+    }
+    output.push('\n');
+}
+
+fn push_evidence(output: &mut String, evidence: &[EvidenceRef]) {
+    if evidence.is_empty() {
+        return;
+    }
+    output.push_str("  Evidence:\n");
+    for item in evidence {
+        let line_suffix = match (item.start_line, item.end_line) {
+            (Some(start), Some(end)) => format!(":{start}-{end}"),
+            (Some(start), None) => format!(":{start}"),
+            _ => String::new(),
+        };
+        output.push_str(&format!(
+            "  - `{}`{}: {}\n",
+            item.path.0, line_suffix, item.reason
+        ));
+    }
+}
+
+fn blank_if_empty(value: &str) -> &str {
+    if value.trim().is_empty() {
+        "None."
+    } else {
+        value.trim()
+    }
+}
+
+fn current_date_string() -> String {
+    let days = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| (duration.as_secs() / 86_400) as i64)
+        .unwrap_or_default();
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i64, i64, i64) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let month_prime = (5 * doy + 2) / 153;
+    let day = doy - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+
+    (year, month, day)
+}
+
+fn slugify_task(task: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_was_dash = false;
+    for character in task.chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character);
+            previous_was_dash = false;
+        } else if !previous_was_dash && !slug.is_empty() {
+            slug.push('-');
+            previous_was_dash = true;
+        }
+        if slug.len() >= 60 {
+            break;
+        }
+    }
+
+    let slug = slug.trim_matches('-').to_owned();
+    if slug.is_empty() {
+        "design".to_owned()
+    } else {
+        slug
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SolveOptions {
     repo: PathBuf,
@@ -192,6 +521,27 @@ struct SolveFlags {
     api_key_env: Option<String>,
     max_steps: Option<usize>,
     info_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DesignOptions {
+    repo: PathBuf,
+    task: String,
+    dry_run: bool,
+    model_provider: ModelProviderKind,
+    openai: OpenAiConfig,
+    codex_cli: CodexCliConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DesignFlags {
+    repo: String,
+    task: String,
+    dry_run: bool,
+    model_provider: Option<ModelProviderKind>,
+    model: Option<String>,
+    base_url: Option<String>,
+    api_key_env: Option<String>,
 }
 
 fn solve_options(args: &[String]) -> Result<SolveOptions, String> {
@@ -245,6 +595,47 @@ fn solve_options(args: &[String]) -> Result<SolveOptions, String> {
     })
 }
 
+fn design_options(args: &[String]) -> Result<DesignOptions, String> {
+    let flags = DesignFlags::parse(args)?;
+    let repo = accessible_repo_path(&flags.repo)?;
+    let config = PatchwrightConfig::load(&repo).map_err(|error| error.to_string())?;
+    let model_provider = selected_design_model_provider(&flags, &config)?;
+    let openai_model = flags
+        .model
+        .clone()
+        .or_else(|| config.model.openai.model.clone())
+        .or_else(|| config.model.model.clone());
+    let codex_model = flags
+        .model
+        .clone()
+        .or_else(|| config.model.codex_cli.model.clone())
+        .or_else(|| config.model.model.clone());
+
+    Ok(DesignOptions {
+        repo,
+        task: flags.task,
+        dry_run: flags.dry_run,
+        model_provider,
+        openai: OpenAiConfig {
+            base_url: flags
+                .base_url
+                .or_else(|| config.model.openai.base_url.clone())
+                .unwrap_or(config.model.base_url),
+            model: openai_model.unwrap_or_default(),
+            api_key_env: flags
+                .api_key_env
+                .or_else(|| config.model.openai.api_key_env.clone())
+                .unwrap_or(config.model.api_key_env),
+            timeout_seconds: config.model.openai.timeout_seconds,
+        },
+        codex_cli: CodexCliConfig {
+            command: config.model.codex_cli.command,
+            model: codex_model,
+            timeout_seconds: config.model.codex_cli.timeout_seconds,
+        },
+    })
+}
+
 impl SolveFlags {
     fn parse(args: &[String]) -> Result<Self, String> {
         validate_solve_args(args)?;
@@ -287,8 +678,54 @@ impl SolveFlags {
     }
 }
 
+impl DesignFlags {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        validate_design_args(args)?;
+
+        let Some(repo) = value_after(args, "--repo") else {
+            return Err("design requires --repo <path> and --task <text>".to_owned());
+        };
+        let Some(task) = value_after(args, "--task") else {
+            return Err("design requires --repo <path> and --task <text>".to_owned());
+        };
+
+        Ok(Self {
+            repo,
+            task,
+            dry_run: has_flag(args, "--dry-run"),
+            model_provider: optional_model_provider_for(args, "design")?,
+            model: optional_value_if_present_for(args, "--model", "design")?,
+            base_url: optional_value_if_present_for(args, "--base-url", "design")?,
+            api_key_env: optional_value_if_present_for(args, "--api-key-env", "design")?,
+        })
+    }
+}
+
 fn selected_model_provider(
     flags: &SolveFlags,
+    config: &PatchwrightConfig,
+) -> Result<ModelProviderKind, String> {
+    if matches!(flags.model_provider, Some(ModelProviderKind::CodexCli))
+        && (flags.base_url.is_some() || flags.api_key_env.is_some())
+    {
+        return Err(
+            "OpenAI-compatible flags require --model-provider openai-compatible".to_owned(),
+        );
+    }
+
+    if let Some(provider) = flags.model_provider.clone() {
+        return Ok(provider);
+    }
+
+    if flags.base_url.is_some() || flags.api_key_env.is_some() {
+        return Ok(ModelProviderKind::OpenAiCompatible);
+    }
+
+    Ok(config.model.provider.clone())
+}
+
+fn selected_design_model_provider(
+    flags: &DesignFlags,
     config: &PatchwrightConfig,
 ) -> Result<ModelProviderKind, String> {
     if matches!(flags.model_provider, Some(ModelProviderKind::CodexCli))
@@ -347,6 +784,43 @@ fn validate_solve_args(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_design_args(args: &[String]) -> Result<(), String> {
+    for arg in args.iter().skip(1) {
+        if arg == "--api-key" || arg.starts_with("--api-key=") {
+            return Err("raw API keys are not accepted; use --api-key-env <name>".to_owned());
+        }
+    }
+
+    let mut index = 1;
+    while index < args.len() {
+        let arg = &args[index];
+        if !arg.starts_with("--") {
+            return Err(format!("unexpected design argument: {arg}"));
+        }
+
+        if is_design_value_flag(arg) {
+            index += if args
+                .get(index + 1)
+                .is_some_and(|value| !value.starts_with("--"))
+            {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+
+        if is_design_bool_flag(arg) {
+            index += 1;
+            continue;
+        }
+
+        return Err(format!("unknown design flag: {arg}"));
+    }
+
+    Ok(())
+}
+
 fn is_solve_value_flag(arg: &str) -> bool {
     matches!(
         arg,
@@ -362,6 +836,17 @@ fn is_solve_value_flag(arg: &str) -> bool {
 
 fn is_solve_bool_flag(arg: &str) -> bool {
     matches!(arg, "--dry-run" | "--info-only")
+}
+
+fn is_design_value_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--repo" | "--task" | "--model-provider" | "--model" | "--base-url" | "--api-key-env"
+    )
+}
+
+fn is_design_bool_flag(arg: &str) -> bool {
+    matches!(arg, "--dry-run")
 }
 
 fn run_config_check(args: &[String]) -> Result<String, String> {
@@ -601,6 +1086,13 @@ impl ModelProvider for CliModel {
             Self::CodexCli(model) => model.propose_action(request),
         }
     }
+
+    fn propose_design(&mut self, request: ModelRequest) -> PatchwrightResult<ArchitectureDesign> {
+        match self {
+            Self::OpenAi(model) => model.propose_design(request),
+            Self::CodexCli(model) => model.propose_design(request),
+        }
+    }
 }
 
 fn cli_model(options: &SolveOptions) -> Result<CliModel, String> {
@@ -630,6 +1122,33 @@ fn cli_model(options: &SolveOptions) -> Result<CliModel, String> {
     }
 }
 
+fn design_model(options: &DesignOptions) -> Result<CliModel, String> {
+    if options.dry_run {
+        let mut config = options.openai.clone();
+        if config.model.is_empty() {
+            config.model = "dry-run".to_owned();
+        }
+        return Ok(CliModel::OpenAi(OpenAiCompatibleClient::dry_run(config)));
+    }
+
+    match options.model_provider {
+        ModelProviderKind::CodexCli => Ok(CliModel::CodexCli(CodexCliClient::new(
+            options.codex_cli.clone(),
+        ))),
+        ModelProviderKind::OpenAiCompatible => {
+            if options.openai.model.is_empty() {
+                return Err(
+                    "OpenAI-compatible design requires --model <name> or model.openai.model"
+                        .to_owned(),
+                );
+            }
+            Ok(CliModel::OpenAi(OpenAiCompatibleClient::new(
+                options.openai.clone(),
+            )))
+        }
+    }
+}
+
 fn rust_adapter(config: &RustConfig) -> RustAdapter {
     RustAdapter::new(config.fmt, config.check, config.test, config.clippy)
 }
@@ -644,17 +1163,32 @@ fn value_after(args: &[String], flag: &str) -> Option<String> {
 }
 
 fn optional_value_if_present(args: &[String], flag: &str) -> Result<Option<String>, String> {
+    optional_value_if_present_for(args, flag, "solve")
+}
+
+fn optional_value_if_present_for(
+    args: &[String],
+    flag: &str,
+    command_name: &str,
+) -> Result<Option<String>, String> {
     match value_after(args, flag) {
         Some(value) => Ok(Some(value)),
-        None if has_flag(args, flag) => Err(format!("solve requires {flag} <value>")),
+        None if has_flag(args, flag) => Err(format!("{command_name} requires {flag} <value>")),
         None => Ok(None),
     }
 }
 
 fn optional_model_provider(args: &[String]) -> Result<Option<ModelProviderKind>, String> {
+    optional_model_provider_for(args, "solve")
+}
+
+fn optional_model_provider_for(
+    args: &[String],
+    command_name: &str,
+) -> Result<Option<ModelProviderKind>, String> {
     let Some(value) = value_after(args, "--model-provider") else {
         if has_flag(args, "--model-provider") {
-            return Err("solve requires --model-provider <name>".to_owned());
+            return Err(format!("{command_name} requires --model-provider <name>"));
         }
         return Ok(None);
     };
@@ -690,7 +1224,7 @@ fn accessible_repo_path(path: &str) -> Result<PathBuf, String> {
 
 fn print_help() {
     println!(
-        "patchwright\n\nUSAGE:\n    patchwright --version\n    patchwright status\n    patchwright auth login [--repo <path>]\n    patchwright auth check [--repo <path>]\n    patchwright config check [--repo <path>]\n    patchwright bench startup\n    patchwright solve --repo <path> --task <text> [--dry-run] [--model-provider codex-cli|openai-compatible] [--model <name>] [--base-url <url>] [--api-key-env <name>] [--max-steps <n>] [--info-only]\n    patchwright verify --repo <path>"
+        "patchwright\n\nUSAGE:\n    patchwright --version\n    patchwright status\n    patchwright auth login [--repo <path>]\n    patchwright auth check [--repo <path>]\n    patchwright config check [--repo <path>]\n    patchwright bench startup\n    patchwright design --repo <path> --task <text> [--dry-run] [--model-provider codex-cli|openai-compatible] [--model <name>] [--base-url <url>] [--api-key-env <name>]\n    patchwright solve --repo <path> --task <text> [--dry-run] [--model-provider codex-cli|openai-compatible] [--model <name>] [--base-url <url>] [--api-key-env <name>] [--max-steps <n>] [--info-only]\n    patchwright verify --repo <path>"
     );
 }
 
@@ -1367,6 +1901,45 @@ mod tests {
         assert!(fs::read_to_string(repo.root().join("src/lib.rs"))
             .unwrap()
             .contains("pub fn value() -> i32 { 2 }"));
+    }
+
+    #[test]
+    fn design_dry_run_writes_markdown_plan_without_source_changes() {
+        let repo = TempRepo::new("cli-design-dry-run");
+        repo.write(
+            "Cargo.toml",
+            "[package]\nname = \"cli_design_dry_run\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        repo.write("src/lib.rs", "pub fn value() -> i32 { 1 }\n");
+        repo.commit_all("seed source");
+
+        let result = run([
+            "design".to_owned(),
+            "--repo".to_owned(),
+            repo.root().to_string_lossy().into_owned(),
+            "--task".to_owned(),
+            "Add team billing".to_owned(),
+            "--dry-run".to_owned(),
+        ]);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            fs::read_to_string(repo.root().join("src/lib.rs")).unwrap(),
+            "pub fn value() -> i32 { 1 }\n"
+        );
+
+        let plans_dir = repo.root().join("docs/patchwright/plans");
+        let plans = fs::read_dir(plans_dir)
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(plans.len(), 1);
+
+        let content = fs::read_to_string(plans[0].path()).unwrap();
+        assert!(content.contains("# Feature Design: Add Team Billing"));
+        assert!(content.contains("## Current Architecture"));
+        assert!(content.contains("## Implementation Plan"));
+        assert!(content.contains("src/lib.rs"));
     }
 
     fn toml_escape_path(path: &Path) -> String {

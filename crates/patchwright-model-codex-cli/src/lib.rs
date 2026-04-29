@@ -2,7 +2,7 @@
 
 use patchwright_core::error::{PatchwrightError, Result};
 use patchwright_core::traits::ModelProvider;
-use patchwright_core::types::{ModelRequest, ModelResponse};
+use patchwright_core::types::{ArchitectureDesign, ModelRequest, ModelResponse};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{Read, Write};
@@ -156,6 +156,45 @@ impl ModelProvider for CodexCliClient {
         let action = patchwright_model_contract::parse_action_json(&content)?;
 
         Ok(ModelResponse { action })
+    }
+
+    fn propose_design(&mut self, request: ModelRequest) -> Result<ArchitectureDesign> {
+        let work_dir = TempActionDir::create()?;
+        let schema_path = work_dir.path().join("architecture-design.schema.json");
+        let design_path = work_dir.path().join("architecture-design.json");
+
+        patchwright_model_contract::write_architecture_design_schema(&schema_path)?;
+        let prompt = patchwright_model_contract::render_design_exec_prompt(&request);
+
+        let output = run_codex_exec(
+            &self.config,
+            work_dir.path(),
+            &schema_path,
+            &design_path,
+            &prompt,
+        )?;
+        if output.timed_out {
+            return Err(PatchwrightError::Model(
+                output.timeout_error("codex design exec"),
+            ));
+        }
+        if !output.success() {
+            return Err(PatchwrightError::Model(format!(
+                "codex design exec failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+                output.status_code(),
+                output.stdout,
+                output.stderr
+            )));
+        }
+
+        let content = fs::read_to_string(&design_path).map_err(|error| {
+            PatchwrightError::Model(format!(
+                "codex design exec did not write architecture design output {}: {error}",
+                design_path.display()
+            ))
+        })?;
+
+        patchwright_model_contract::parse_architecture_design_json(&content)
     }
 }
 

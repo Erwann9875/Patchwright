@@ -5,7 +5,7 @@ use patchwright_core::types::{
 };
 use patchwright_model_contract::{
     action_output_schema, architecture_design_schema, build_openai_prompt, build_prompt,
-    parse_action_json, render_exec_prompt,
+    parse_action_json, parse_architecture_design_json, render_exec_prompt,
 };
 use std::path::PathBuf;
 
@@ -183,6 +183,98 @@ fn architecture_design_schema_requires_professional_design_sections() {
     assert!(schema.to_string().contains("path"));
     assert!(schema.to_string().contains("start_line"));
     assert!(schema.to_string().contains("verification_commands"));
+}
+
+#[test]
+fn parses_architecture_design_json() {
+    let design = parse_architecture_design_json(
+        r#"{
+          "title": "Feature Design: Team Billing",
+          "goal": "Add organization billing.",
+          "current_architecture": [
+            {
+              "summary": "Sessions are owned by auth.",
+              "evidence": [
+                {
+                  "path": "src/auth/session.rs",
+                  "start_line": 10,
+                  "end_line": 30,
+                  "reason": "session creation"
+                }
+              ]
+            }
+          ],
+          "assumptions": ["Stripe remains the billing provider."],
+          "non_goals": ["Do not rewrite auth."],
+          "options": [
+            {
+              "name": "Organizations",
+              "summary": "Add organizations and memberships.",
+              "pros": ["Future role support."],
+              "cons": ["Migration required."],
+              "evidence": []
+            }
+          ],
+          "recommendation": {
+            "option_name": "Organizations",
+            "rationale": "Keeps billing separate from user identity.",
+            "evidence": []
+          },
+          "file_impact": [
+            {
+              "path": "src/auth/session.rs",
+              "change_summary": "Load membership context.",
+              "risk": null,
+              "evidence": []
+            }
+          ],
+          "implementation_plan": [
+            {
+              "id": "step-1",
+              "title": "Add organization model",
+              "description": "Create organization storage.",
+              "depends_on": [],
+              "target_files": ["src/org.rs"],
+              "acceptance_criteria": ["Model compiles."],
+              "verification_commands": ["cargo test"]
+            }
+          ],
+          "test_strategy": {
+            "unit": ["role parsing"],
+            "integration": ["invoice ownership"],
+            "end_to_end": [],
+            "manual": [],
+            "commands": ["cargo test"]
+          },
+          "migration_plan": null,
+          "rollback_plan": "Drop unreleased tables.",
+          "risks": [
+            {
+              "title": "Wrong invoice owner",
+              "impact": "Billing data may attach to users.",
+              "mitigation": "Add invoice ownership tests.",
+              "evidence": []
+            }
+          ],
+          "open_questions": ["Are guests billable?"],
+          "acceptance_criteria": ["Admins can view invoices."]
+        }"#,
+    )
+    .expect("design JSON should parse");
+
+    assert_eq!(design.title, "Feature Design: Team Billing");
+    assert_eq!(
+        design.current_architecture[0].evidence[0].path.0,
+        "src/auth/session.rs"
+    );
+    assert_eq!(
+        design.implementation_plan[0].target_files[0].0,
+        "src/org.rs"
+    );
+    assert_eq!(
+        design.rollback_plan.as_deref(),
+        Some("Drop unreleased tables.")
+    );
 }
 
 #[test]
