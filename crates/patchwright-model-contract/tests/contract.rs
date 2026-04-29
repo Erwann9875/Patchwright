@@ -5,7 +5,8 @@ use patchwright_core::types::{
 };
 use patchwright_model_contract::{
     action_output_schema, architecture_design_schema, build_openai_prompt, build_prompt,
-    parse_action_json, parse_architecture_design_json, render_exec_prompt,
+    implementation_graph_schema, parse_action_json, parse_architecture_design_json,
+    parse_implementation_graph_json, render_exec_prompt, render_implementation_graph_markdown,
 };
 use std::path::PathBuf;
 
@@ -275,6 +276,56 @@ fn parses_architecture_design_json() {
         design.rollback_plan.as_deref(),
         Some("Drop unreleased tables.")
     );
+}
+
+#[test]
+fn parses_and_renders_implementation_graph_json() {
+    let graph = parse_implementation_graph_json(
+        r#"{
+          "steps": [
+            {
+              "id": "step-1",
+              "title": "Add domain type",
+              "description": "Introduce the smallest domain model first.",
+              "depends_on": [],
+              "target_files": ["src/domain.rs"],
+              "acceptance_criteria": ["Domain type compiles."],
+              "verification_commands": ["cargo test domain"]
+            },
+            {
+              "id": "step-2",
+              "title": "Wire API",
+              "description": "Use the domain type in the API boundary.",
+              "depends_on": ["step-1"],
+              "target_files": ["src/api.rs"],
+              "acceptance_criteria": ["API tests pass."],
+              "verification_commands": ["cargo test api"]
+            }
+          ]
+        }"#,
+    )
+    .expect("implementation graph JSON should parse");
+
+    assert_eq!(graph.steps[1].depends_on, vec!["step-1"]);
+    assert_eq!(graph.steps[1].target_files[0], RepoPath::new("src/api.rs"));
+
+    let markdown = render_implementation_graph_markdown(&graph);
+    assert!(markdown.contains("# Implementation Graph"));
+    assert!(markdown.contains("## step-1. Add domain type"));
+    assert!(markdown.contains("Depends on: none"));
+    assert!(markdown.contains("Target files:\n- `src/api.rs`"));
+}
+
+#[test]
+fn implementation_graph_schema_requires_steps() {
+    let schema = implementation_graph_schema();
+
+    assert_eq!(schema["type"], "object");
+    assert!(schema["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "steps"));
 }
 
 #[test]

@@ -189,6 +189,11 @@ pub struct PlanStep {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImplementationGraph {
+    pub steps: Vec<PlanStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestStrategy {
     pub unit: Vec<String>,
     pub integration: Vec<String>,

@@ -1,6 +1,6 @@
 use patchwright_core::types::{
-    ArchitectureDesign, ArchitectureFinding, DesignOption, EvidenceRef, FileImpact, PlanStep,
-    RecommendedDesign, RepoPath, Risk, TaskMode, TestStrategy,
+    ArchitectureDesign, ArchitectureFinding, DesignOption, EvidenceRef, FileImpact,
+    ImplementationGraph, PlanStep, RecommendedDesign, RepoPath, Risk, TaskMode, TestStrategy,
 };
 
 #[test]
@@ -74,4 +74,40 @@ fn architecture_design_artifacts_attach_file_evidence() {
     );
     assert_eq!(design.implementation_plan[0].id, "step-1");
     assert_eq!(design.risks[0].evidence[0].start_line, Some(12));
+}
+
+#[test]
+fn implementation_graph_steps_carry_dependencies_and_verification() {
+    let graph = ImplementationGraph {
+        steps: vec![
+            PlanStep {
+                id: "step-1".to_owned(),
+                title: "Add domain type".to_owned(),
+                description: "Introduce the smallest domain model first.".to_owned(),
+                depends_on: Vec::new(),
+                target_files: vec![RepoPath::new("src/domain.rs")],
+                acceptance_criteria: vec!["Domain type compiles.".to_owned()],
+                verification_commands: vec!["cargo test domain".to_owned()],
+            },
+            PlanStep {
+                id: "step-2".to_owned(),
+                title: "Wire API".to_owned(),
+                description: "Use the domain type in the API boundary.".to_owned(),
+                depends_on: vec!["step-1".to_owned()],
+                target_files: vec![RepoPath::new("src/api.rs")],
+                acceptance_criteria: vec!["API tests pass.".to_owned()],
+                verification_commands: vec!["cargo test api".to_owned()],
+            },
+        ],
+    };
+
+    assert_eq!(graph.steps[1].depends_on, vec!["step-1"]);
+    assert_eq!(
+        graph.steps[1].target_files,
+        vec![RepoPath::new("src/api.rs")]
+    );
+    assert_eq!(
+        graph.steps[0].verification_commands,
+        vec!["cargo test domain"]
+    );
 }

@@ -2,7 +2,7 @@
 
 use patchwright_core::action::Action;
 use patchwright_core::error::{PatchwrightError, Result};
-use patchwright_core::types::ArchitectureDesign;
+use patchwright_core::types::{ArchitectureDesign, ImplementationGraph, PlanStep};
 use patchwright_core::types::{
     ContextPack, FileQuery, LineRange, ModelRequest, Patch, RepoPath, SearchQuery,
 };
@@ -124,6 +124,30 @@ pub fn parse_architecture_design_json(content: &str) -> Result<ArchitectureDesig
     })
 }
 
+pub fn parse_implementation_graph_json(content: &str) -> Result<ImplementationGraph> {
+    serde_json::from_str(content).map_err(|error| {
+        PatchwrightError::Model(format!(
+            "model implementation graph content was not valid JSON: {error}"
+        ))
+    })
+}
+
+pub fn render_implementation_graph_markdown(graph: &ImplementationGraph) -> String {
+    let mut output = String::new();
+    output.push_str("# Implementation Graph\n\n");
+
+    if graph.steps.is_empty() {
+        output.push_str("No implementation steps.\n");
+        return output;
+    }
+
+    for step in &graph.steps {
+        render_plan_step(&mut output, step);
+    }
+
+    output
+}
+
 pub fn design_system_prompt() -> &'static str {
     r#"Create a senior-engineer architecture design for the requested task.
 
@@ -169,6 +193,15 @@ pub fn architecture_design_schema() -> Value {
             "acceptance_criteria": string_array_schema()
         }
     })
+}
+
+pub fn implementation_graph_schema() -> Value {
+    object_with_required(
+        ["steps"],
+        json!({
+            "steps": array_of(plan_step_schema())
+        }),
+    )
 }
 
 fn architecture_finding_schema() -> Value {
@@ -307,6 +340,39 @@ fn nullable_string_schema() -> Value {
 
 fn nullable_integer_schema() -> Value {
     json!({ "type": ["integer", "null"], "minimum": 1 })
+}
+
+fn render_plan_step(output: &mut String, step: &PlanStep) {
+    output.push_str(&format!("## {}. {}\n\n", step.id, step.title));
+    output.push_str(&format!("{}\n\n", step.description));
+    output.push_str(&format!(
+        "Depends on: {}\n\n",
+        if step.depends_on.is_empty() {
+            "none".to_owned()
+        } else {
+            step.depends_on.join(", ")
+        }
+    ));
+
+    render_markdown_list(output, "Target files", &repo_paths(&step.target_files));
+    render_markdown_list(output, "Acceptance criteria", &step.acceptance_criteria);
+    render_markdown_list(output, "Verification commands", &step.verification_commands);
+}
+
+fn render_markdown_list(output: &mut String, heading: &str, items: &[String]) {
+    output.push_str(&format!("{heading}:\n"));
+    if items.is_empty() {
+        output.push_str("- none\n\n");
+        return;
+    }
+    for item in items {
+        output.push_str(&format!("- {item}\n"));
+    }
+    output.push('\n');
+}
+
+fn repo_paths(paths: &[RepoPath]) -> Vec<String> {
+    paths.iter().map(|path| format!("`{}`", path.0)).collect()
 }
 
 pub fn system_prompt() -> &'static str {
