@@ -1,5 +1,5 @@
 use patchwright_core::traits::Indexer;
-use patchwright_core::types::{FileQuery, RepoPath, SearchQuery};
+use patchwright_core::types::{Counterexample, FileQuery, RepoPath, SearchQuery, TaskSpec};
 use patchwright_core::PatchwrightError;
 use patchwright_index::BasicIndexer;
 use patchwright_test_support::TempRepo;
@@ -172,6 +172,49 @@ fn slash_normalizes_nested_paths() {
 
     let files = indexer.list_files(FileQuery::default()).unwrap();
     assert!(files.iter().any(|file| file.path.0 == "src/nested/mod.rs"));
+}
+
+#[test]
+fn context_pack_prioritizes_rust_sources_tests_and_manifests() {
+    let repo = TempRepo::new("basic-index-context-pack");
+    repo.write("Cargo.toml", "[package]\nname = \"context-pack\"\n");
+    repo.write(
+        "src/lib.rs",
+        "pub fn parse_user(input: &str) -> String { input.into() }\n",
+    );
+    repo.write(
+        "tests/parser_test.rs",
+        "#[test]\nfn parse_user_accepts_name() {}\n",
+    );
+    repo.write("README.md", "# context pack\n");
+
+    let indexer = BasicIndexer::new(repo.root());
+    let task = TaskSpec::from_text(repo.root().to_path_buf(), "fix parser parse_user failure");
+    let counterexamples = vec![Counterexample {
+        source: "cargo test".to_string(),
+        detail: "tests/parser_test.rs parse_user_accepts_name failed".to_string(),
+    }];
+
+    let pack = indexer.context_pack(&task, &[], &counterexamples).unwrap();
+
+    assert_eq!(pack.manifests, vec![RepoPath::new("Cargo.toml")]);
+    assert_eq!(
+        pack.likely_tests,
+        vec![RepoPath::new("tests/parser_test.rs")]
+    );
+    assert_eq!(pack.files[0].path, RepoPath::new("tests/parser_test.rs"));
+    assert!(
+        pack.files
+            .iter()
+            .any(|file| file.path == RepoPath::new("src/lib.rs")),
+        "ranked context should include Rust sources"
+    );
+    assert!(
+        pack.files
+            .iter()
+            .any(|file| file.path == RepoPath::new("Cargo.toml")),
+        "ranked context should include manifests"
+    );
 }
 
 #[cfg(windows)]

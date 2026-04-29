@@ -212,6 +212,15 @@ pub struct FileQuery {
     pub root: Option<RepoPath>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ContextPack {
+    pub files: Vec<ScoredPath>,
+    pub likely_tests: Vec<RepoPath>,
+    pub manifests: Vec<RepoPath>,
+    pub recent_observations: Vec<Observation>,
+    pub counterexamples: Vec<Counterexample>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Symbol {
     pub name: String,
@@ -230,6 +239,7 @@ pub struct ModelRequest {
     pub task: TaskSpec,
     pub observations: Vec<Observation>,
     pub counterexamples: Vec<Counterexample>,
+    pub context: Option<ContextPack>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

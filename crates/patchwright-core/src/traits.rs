@@ -1,9 +1,11 @@
+use crate::action::Observation;
 use crate::error::Result;
 use crate::policy::Policy;
 use crate::types::{
-    CommandSpec, DetectionScore, DiffSummary, FileQuery, FileSlice, LineRange, ModelRequest,
-    ModelResponse, Patch, PatchId, RepoPath, RepoView, RunReport, ScoredPath, SearchQuery,
-    SearchResults, SnapshotId, Symbol, TaskSpec, VerificationReport, VerifierPlan,
+    CommandSpec, ContextPack, Counterexample, DetectionScore, DiffSummary, FileQuery, FileSlice,
+    LineRange, ModelRequest, ModelResponse, Patch, PatchId, RepoPath, RepoView, RunReport,
+    ScoredPath, SearchQuery, SearchResults, SnapshotId, Symbol, TaskSpec, VerificationReport,
+    VerifierPlan,
 };
 
 pub trait ModelProvider {
@@ -31,6 +33,30 @@ pub trait Indexer {
     fn list_files(&self, query: FileQuery) -> Result<Vec<ScoredPath>>;
     fn search_text(&self, query: SearchQuery) -> Result<SearchResults>;
     fn symbols(&self, path: &RepoPath) -> Result<Vec<Symbol>>;
+
+    fn context_pack(
+        &self,
+        _task: &TaskSpec,
+        observations: &[Observation],
+        counterexamples: &[Counterexample],
+    ) -> Result<ContextPack> {
+        let mut files = self.list_files(FileQuery::default())?;
+        files.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.path.0.cmp(&right.path.0))
+        });
+        files.truncate(20);
+
+        Ok(ContextPack {
+            files,
+            likely_tests: Vec::new(),
+            manifests: Vec::new(),
+            recent_observations: observations.to_vec(),
+            counterexamples: counterexamples.to_vec(),
+        })
+    }
 }
 
 pub trait Verifier {

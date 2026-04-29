@@ -1,9 +1,11 @@
 #![forbid(unsafe_code)]
 
+use patchwright_core::action::Observation;
 use patchwright_core::error::PatchwrightError;
 use patchwright_core::traits::Indexer;
 use patchwright_core::types::{
-    FileQuery, RepoPath, ScoredPath, SearchMatch, SearchQuery, SearchResults, Symbol,
+    ContextPack, Counterexample, FileQuery, RepoPath, ScoredPath, SearchMatch, SearchQuery,
+    SearchResults, Symbol, TaskSpec,
 };
 use patchwright_core::Result;
 use std::fs;
@@ -79,6 +81,113 @@ impl Indexer for BasicIndexer {
 
     fn symbols(&self, _path: &RepoPath) -> Result<Vec<Symbol>> {
         Ok(Vec::new())
+    }
+
+    fn context_pack(
+        &self,
+        task: &TaskSpec,
+        observations: &[Observation],
+        counterexamples: &[Counterexample],
+    ) -> Result<ContextPack> {
+        let task_words = task_words(&task.text);
+        let mut files = self.list_files(FileQuery::default())?;
+
+        for file in &mut files {
+            file.score = context_score(&file.path.0, &task_words, counterexamples);
+        }
+
+        files.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.path.0.cmp(&right.path.0))
+        });
+
+        let likely_tests = files
+            .iter()
+            .filter(|file| is_likely_test(&file.path.0))
+            .map(|file| file.path.clone())
+            .collect();
+        let manifests = files
+            .iter()
+            .filter(|file| is_manifest(&file.path.0))
+            .map(|file| file.path.clone())
+            .collect();
+
+        files.truncate(20);
+
+        Ok(ContextPack {
+            files,
+            likely_tests,
+            manifests,
+            recent_observations: observations.iter().rev().take(8).cloned().collect(),
+            counterexamples: counterexamples.to_vec(),
+        })
+    }
+}
+
+fn context_score(path: &str, task_words: &[String], counterexamples: &[Counterexample]) -> u16 {
+    let lower_path = path.to_ascii_lowercase();
+    let mut score = 1;
+
+    if is_manifest(path) {
+        score += 90;
+    }
+    if path.ends_with(".rs") {
+        score += 30;
+    }
+    if is_likely_test(path) {
+        score += 50;
+    }
+    for word in task_words {
+        if lower_path.contains(word) {
+            score += 40;
+        }
+    }
+    if counterexamples
+        .iter()
+        .any(|counterexample| counterexample.detail.contains(path))
+    {
+        score += 100;
+    }
+
+    score
+}
+
+fn is_manifest(path: &str) -> bool {
+    path == "Cargo.toml" || path.ends_with("/Cargo.toml")
+}
+
+fn is_likely_test(path: &str) -> bool {
+    path.starts_with("tests/")
+        || path.contains("/tests/")
+        || path.contains("_test")
+        || path.contains("test_")
+}
+
+fn task_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+
+    for character in text.chars() {
+        if character.is_ascii_alphanumeric() || character == '_' {
+            current.push(character.to_ascii_lowercase());
+        } else {
+            push_task_word(&mut words, &mut current);
+        }
+    }
+    push_task_word(&mut words, &mut current);
+
+    words.sort();
+    words.dedup();
+    words
+}
+
+fn push_task_word(words: &mut Vec<String>, current: &mut String) {
+    if current.len() >= 3 {
+        words.push(std::mem::take(current));
+    } else {
+        current.clear();
     }
 }
 

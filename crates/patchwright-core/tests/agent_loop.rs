@@ -6,12 +6,12 @@ use patchwright_core::traits::{
     ExecutionBackend, Indexer, LanguageAdapter, ModelProvider, Verifier,
 };
 use patchwright_core::types::{
-    CommandSpec, Counterexample, DetectionScore, DiffSummary, FileQuery, FileSlice, LineRange,
-    ModelRequest, ModelResponse, Patch, PatchId, PolicyEvent, RepoPath, RepoView, RunReport,
-    ScoredPath, SearchQuery, SearchResults, SnapshotId, TaskSpec, VerificationReport,
+    CommandSpec, ContextPack, Counterexample, DetectionScore, DiffSummary, FileQuery, FileSlice,
+    LineRange, ModelRequest, ModelResponse, Patch, PatchId, PolicyEvent, RepoPath, RepoView,
+    RunReport, ScoredPath, SearchQuery, SearchResults, SnapshotId, TaskSpec, VerificationReport,
     VerificationStatus, VerifierPlan,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -26,6 +26,20 @@ impl ModelProvider for ScriptedModel {
         }
         Ok(ModelResponse {
             action: self.actions.remove(0),
+        })
+    }
+}
+
+struct RecordingModel {
+    requests: Rc<RefCell<Vec<ModelRequest>>>,
+    action: Action,
+}
+
+impl ModelProvider for RecordingModel {
+    fn propose_action(&mut self, request: ModelRequest) -> Result<ModelResponse> {
+        self.requests.borrow_mut().push(request);
+        Ok(ModelResponse {
+            action: self.action.clone(),
         })
     }
 }
@@ -114,6 +128,27 @@ struct EmptyIndex;
 impl Indexer for EmptyIndex {
     fn list_files(&self, _query: FileQuery) -> Result<Vec<ScoredPath>> {
         Ok(Vec::new())
+    }
+
+    fn search_text(&self, _query: SearchQuery) -> Result<SearchResults> {
+        Ok(SearchResults {
+            matches: Vec::new(),
+        })
+    }
+
+    fn symbols(&self, _path: &RepoPath) -> Result<Vec<patchwright_core::types::Symbol>> {
+        Ok(Vec::new())
+    }
+}
+
+struct ContextIndex;
+
+impl Indexer for ContextIndex {
+    fn list_files(&self, _query: FileQuery) -> Result<Vec<ScoredPath>> {
+        Ok(vec![ScoredPath {
+            path: RepoPath::new("src/lib.rs"),
+            score: 7,
+        }])
     }
 
     fn search_text(&self, _query: SearchQuery) -> Result<SearchResults> {
@@ -435,6 +470,52 @@ fn finish_action_returns_finished() {
         report.observations.last(),
         Some(Observation::Finished(summary)) if summary == "no change needed"
     ));
+}
+
+#[test]
+fn model_request_includes_index_context_pack() {
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let model = RecordingModel {
+        requests: Rc::clone(&requests),
+        action: Action::Finish {
+            summary: "done".to_owned(),
+        },
+    };
+
+    let mut agent = Agent::builder()
+        .model(model)
+        .execution(FakeExecution::default())
+        .language_adapter(FakeLanguage)
+        .indexer(ContextIndex)
+        .verifier(AcceptingVerifier)
+        .policy(Policy::SafeStructuredOnly)
+        .max_steps(1)
+        .try_build()
+        .expect("agent should build");
+
+    agent
+        .solve(TaskSpec::from_text(PathBuf::from("."), "inspect code"))
+        .expect("simulation should finish");
+
+    let requests = requests.borrow();
+    let context = requests
+        .first()
+        .and_then(|request| request.context.as_ref())
+        .expect("model request should include index context");
+
+    assert_eq!(
+        context,
+        &ContextPack {
+            files: vec![ScoredPath {
+                path: RepoPath::new("src/lib.rs"),
+                score: 7,
+            }],
+            likely_tests: Vec::new(),
+            manifests: Vec::new(),
+            recent_observations: Vec::new(),
+            counterexamples: Vec::new(),
+        }
+    );
 }
 
 #[test]

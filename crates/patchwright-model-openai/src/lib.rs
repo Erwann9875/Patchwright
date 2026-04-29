@@ -4,7 +4,7 @@ use patchwright_core::action::Action;
 use patchwright_core::error::{PatchwrightError, Result};
 use patchwright_core::traits::ModelProvider;
 use patchwright_core::types::{
-    FileQuery, LineRange, ModelRequest, ModelResponse, Patch, RepoPath, SearchQuery,
+    ContextPack, FileQuery, LineRange, ModelRequest, ModelResponse, Patch, RepoPath, SearchQuery,
 };
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -156,15 +156,56 @@ Allowed action examples:
 fn user_prompt(request: &ModelRequest) -> String {
     let observations = format!("{:#?}", request.observations);
     let counterexamples = format!("{:#?}", request.counterexamples);
+    let context = request.context.as_ref().map(render_context);
 
-    let prompt = format!(
+    let mut sections = vec![format!(
         "Task:\n{}\n\nObservations:\n{}\n\nCounterexamples:\n{}",
         truncate_chars(&request.task.text, USER_PROMPT_SECTION_MAX_CHARS),
         truncate_chars(&observations, USER_PROMPT_SECTION_MAX_CHARS),
         truncate_chars(&counterexamples, USER_PROMPT_SECTION_MAX_CHARS)
-    );
+    )];
+    if let Some(context) = context {
+        sections.push(format!(
+            "Context:\n{}",
+            truncate_chars(&context, USER_PROMPT_SECTION_MAX_CHARS)
+        ));
+    }
 
+    let prompt = sections.join("\n\n");
     truncate_chars(&prompt, USER_PROMPT_MAX_CHARS)
+}
+
+fn render_context(context: &ContextPack) -> String {
+    let mut output = String::new();
+
+    output.push_str("Ranked files:\n");
+    if context.files.is_empty() {
+        output.push_str("- none\n");
+    } else {
+        for file in &context.files {
+            output.push_str(&format!("- {} (score {})\n", file.path.0, file.score));
+        }
+    }
+
+    output.push_str("Likely tests:\n");
+    if context.likely_tests.is_empty() {
+        output.push_str("- none\n");
+    } else {
+        for path in &context.likely_tests {
+            output.push_str(&format!("- {}\n", path.0));
+        }
+    }
+
+    output.push_str("Manifests:\n");
+    if context.manifests.is_empty() {
+        output.push_str("- none\n");
+    } else {
+        for path in &context.manifests {
+            output.push_str(&format!("- {}\n", path.0));
+        }
+    }
+
+    output
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
