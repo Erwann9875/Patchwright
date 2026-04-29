@@ -11,6 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 patchwright-core = { path = "../patchwright-core" }
+patchwright-exec-local = { path = "../patchwright-exec-local" }
+patchwright-index = { path = "../patchwright-index" }
+patchwright-lang-rust = { path = "../patchwright-lang-rust" }
+patchwright-model-openai = { path = "../patchwright-model-openai" }
+patchwright-verify = { path = "../patchwright-verify" }
 
 [lints]
 workspace = true

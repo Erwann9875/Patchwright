@@ -240,6 +240,11 @@ name = "patchwright-cli"
 version = "0.1.0"
 dependencies = [
  "patchwright-core",
+ "patchwright-exec-local",
+ "patchwright-index",
+ "patchwright-lang-rust",
+ "patchwright-model-openai",
+ "patchwright-verify",
 ]
 
 [[package]]
